@@ -131,38 +131,58 @@ object RfcommListeners {
      * 3. **协议栈拒绝**：前面两条都排除，就是 `createSocketChannelNative` 返回负值（SDP 登记不上、RFCOMM 起不来）。
      *
      * [probe] 是 [probeFixedChannels] 的结论，用来进一步区分第 3 类里「只是服务记录被拒」还是「整个 RFCOMM 不行」。
+     * [probeDetail] 是 [probeFixedChannels] 的明细（哪些隐藏接口不存在、哪些调用失败），写进日志用。
+     *
+     * 措辞要诚实：读不到前台用户号时不写「用户没问题」，只写「读不到」。
      */
-    fun diagnose(adapter: BluetoothAdapter, probe: String? = null): String {
+    fun diagnose(adapter: BluetoothAdapter, probe: String? = null, probeDetail: String? = null): String {
         val mine = Process.myUid() / PER_USER_RANGE
-        val foreground = foregroundUser()
-        if (foreground != null && foreground != mine) {
-            return "本应用装在用户 $mine 下，而车机当前是用户 $foreground。" +
+        val user = foregroundUser()
+        // 只有拿到真正的前台用户号才能判断「装错用户」；拿到的是本进程用户就说明判断不了。
+        if (user != null && user.exact && user.id != mine) {
+            return "本应用装在用户 $mine 下，而车机当前是用户 ${user.id}。" +
                 "这台车机的蓝牙只给当前用户的应用开监听通道，请把 OpenHC 装到当前用户（主用户）下再试。"
         }
         if (!serviceBound()) {
             return "系统蓝牙服务没绑上（BluetoothAdapter.mService 为空）。" +
                 "请先在车机自带的「蓝牙音乐」里连一次手机把蓝牙唤醒，再回来重试。"
         }
+        val userText = when {
+            user == null -> "本进程用户 $mine（读不到前台用户号，装错用户这一项排除不了）"
+            user.exact -> "本进程用户 $mine，就是车机当前用户"
+            else -> "本进程用户 $mine（读不到前台用户号，装错用户这一项排除不了）"
+        }
         val tail = if (probe != null) "；$probe" else ""
-        return "蓝牙服务和用户都没问题，是这台车机的蓝牙协议栈拒绝了监听请求" +
-            "（`createSocketChannelNative` 返回负值，安卓 4.4 只报 Error: -1）$tail。" +
-            "如果探针能按通道号开监听，说明只是服务记录（SDP）登记被拒；否则整个 RFCOMM 服务端都用不了。" +
-            "这台车机可以改用数据线连接。"
+        val detail = if (!probeDetail.isNullOrBlank()) "（$probeDetail）" else ""
+        return "蓝牙服务在、$userText，剩下唯一可能是这台车机的蓝牙协议栈拒绝了监听请求" +
+            "（`createSocketChannelNative` 返回负值，安卓 4.4 只报 Error: -1）$tail$detail。" +
+            "带服务记录和不带服务记录两种开法都不通，说明整个 RFCOMM 服务端都开不了，不是服务记录（SDP）登记的问题。" +
+            "这台车机的无线投屏走不通，请改用数据线连接。"
     }
 
     /**
      * 不带服务记录的「指定通道号开监听」探针：能开说明 RFCOMM 层本身没问题，问题只在服务记录登记。
      * 试完立刻关掉。返回一句结论（给日志和界面用）。
+     *
+     * 失败时「反射找不到方法」和「方法找到了但调用失败」是两件完全不同的事：前者是这台 ROM 把隐藏接口裁了，
+     * 后者才是 native 层拒绝。只看「不行」两个字会把两种原因混在一起，所以明细放在 [Probe.detail] 里。
      */
-    fun probeFixedChannels(adapter: BluetoothAdapter): String {
+    fun probeFixedChannels(adapter: BluetoothAdapter): Probe {
         val insecure = probeChannels(adapter, "listenUsingInsecureRfcommOn")
         val secure = probeChannels(adapter, "listenUsingRfcommOn")
-        return when {
-            insecure != null -> "按通道号开监听可以（不加密，通道 $insecure），说明只是服务记录登记被拒"
-            secure != null -> "按通道号开监听可以（加密，通道 $secure），说明只是服务记录登记被拒"
+        val detail = "不加密通道开法：${insecure.describe()}；加密通道开法：${secure.describe()}"
+        val conclusion = when {
+            insecure.channel != null -> "按通道号开监听可以（不加密，通道 ${insecure.channel}），说明只是服务记录登记被拒"
+            secure.channel != null -> "按通道号开监听可以（加密，通道 ${secure.channel}），说明只是服务记录登记被拒"
+            // 两种方法都找不到：ROM 裁了隐藏接口，和「协议栈拒绝」是两回事。
+            insecure.missing && secure.missing -> "这台系统里没有「按通道号开监听」的隐藏接口（ROM 裁掉了），探针用不上"
             else -> "按通道号开监听也不行，这台车机的蓝牙协议栈不支持给第三方应用开 RFCOMM 服务端"
         }
+        return Probe(conclusion, detail)
     }
+
+    /** 探针结果：[conclusion] 给用户看，[detail] 写日志（区分方法不存在 / 调用失败）。 */
+    class Probe(val conclusion: String, val detail: String)
 
     /**
      * 车机蓝牙的现状，失败时一起记下来：判断「蓝牙没开」「多用户」「已配对设备数」这类原因。
@@ -176,7 +196,8 @@ object RfcommListeners {
             "读不到蓝牙开关"
         }
         parts += "本进程用户 ${Process.myUid() / PER_USER_RANGE}"
-        foregroundUser()?.let { parts += "前台用户 $it" }
+        // 前台用户号尽量读；读到的只是本进程用户时说清楚，别让人以为是前台用户。
+        foregroundUser()?.let { parts += if (it.exact) "前台用户 ${it.id}" else "本进程用户 ${it.id}（读不到前台用户号）" }
         parts += "已配对 ${bondedCount(adapter)} 台"
         // 系统蓝牙服务有没有绑上（拿不到就是「蓝牙没开」那一类失败，和「被拒」是两回事）。
         parts += "蓝牙服务${if (serviceBound()) "在" else "没绑上"}"
@@ -237,9 +258,10 @@ object RfcommListeners {
         }
         // 一种都不成：再试不带服务记录的探针，区分「RFCOMM 整个不可用」和「只是服务记录被拒」。
         val probe = probeFixedChannels(adapter)
-        sb.append("补充检查：").append(probe).append(LINE_BREAK)
+        sb.append("补充检查：").append(probe.conclusion).append(LINE_BREAK)
+        sb.append("明细：").append(probe.detail).append(LINE_BREAK)
         sb.append(LINE_BREAK)
-        sb.append("结论：").append(diagnose(adapter, probe))
+        sb.append("结论：").append(diagnose(adapter, probe.conclusion, probe.detail))
         return sb.toString()
     }
 
@@ -270,18 +292,41 @@ object RfcommListeners {
         Attempt(how, null, "系统里没有这个接口（${describe(e)}）")
     }
 
-    /** 依次试 1～[MAX_CHANNEL] 号通道，开成第一个就立刻关掉并返回通道号；都不行返回 null。 */
+    /** 按通道号开监听的结果：开成了记 [channel]；[missing] 表示系统里没有这个方法；否则 [error] 是最后一次报错。 */
+    internal class ChannelProbe(val channel: Int?, val missing: Boolean, val error: String?) {
+        fun describe(): String = when {
+            channel != null -> "通道 $channel 可以"
+            missing -> "系统里没有这个方法"
+            else -> "全部通道都不行（$error）"
+        }
+    }
+
+    /**
+     * 依次试 1～[MAX_CHANNEL] 号通道，开成第一个就立刻关掉并返回通道号。
+     *
+     * 先看方法在不在：不在就标 [ChannelProbe.missing]，别把「ROM 裁了接口」误报成「协议栈拒绝」。
+     */
     @SuppressLint("MissingPermission")
-    private fun probeChannels(adapter: BluetoothAdapter, method: String): Int? {
+    private fun probeChannels(adapter: BluetoothAdapter, method: String): ChannelProbe {
+        if (this.method(method, Int::class.javaPrimitiveType ?: return ChannelProbe(null, true, null)) == null) {
+            return ChannelProbe(null, missing = true, error = null)
+        }
+        var lastError: String? = null
         for (channel in 1..MAX_CHANNEL) {
             val socket = try {
                 invokeListenOnChannel(adapter, method, channel)
             } catch (e: SecurityException) {
-                return null
+                // 没权限：后面每个通道都一样，直接收工。
+                return ChannelProbe(null, missing = false, error = "没有蓝牙权限（${describe(e)}）")
+            } catch (e: InvocationTargetException) {
+                // 反射包了一层，真实原因在 cause 里。
+                lastError = describe(e.cause ?: e)
+                continue
             } catch (e: Exception) {
-                // 含反射包出来的 InvocationTargetException：这种通道号开不了，接着试下一个。
+                lastError = describe(e)
                 continue
             } catch (e: LinkageError) {
+                lastError = describe(e)
                 continue
             } ?: continue
             try {
@@ -289,9 +334,9 @@ object RfcommListeners {
             } catch (e: IOException) {
                 // 关不掉也没关系，接着报结论。
             }
-            return channel
+            return ChannelProbe(channel, missing = false, error = null)
         }
-        return null
+        return ChannelProbe(null, missing = false, error = lastError ?: "每个通道都返回空")
     }
 
     /** 反射调 `listenUsingRfcommOn(int)` / `listenUsingInsecureRfcommOn(int)`（都是隐藏接口）。 */
@@ -333,15 +378,41 @@ object RfcommListeners {
         false
     }
 
-    /** 前台用户号（`ActivityManager.getCurrentUser()`，隐藏接口）；读不到返回 null。 */
-    private fun foregroundUser(): Int? = try {
-        val activityManager = Class.forName("android.app.ActivityManager")
-        val getCurrentUser = activityManager.getMethod("getCurrentUser")
-        (getCurrentUser.invoke(null) as? Int)
-    } catch (e: Exception) {
-        null
-    } catch (e: LinkageError) {
-        null
+    /**
+     * 前台用户号。三条路依次试：
+     *
+     * 1. `ActivityManager.getCurrentUser()`（隐藏静态方法，AOSP 一直有，但有的 ROM 会裁掉）——这才是真正的「当前前台用户」；
+     * 2. `UserHandle.myUserId()`（公开接口，安卓 4.1 起就有）——严格说是「本进程用户」；
+     * 3. 从本进程 uid 反推——同上。
+     *
+     * [UserInfo.exact] 表示读的是第 1 条（真的前台用户），否则只是本进程用户。
+     * 全部读不到才返回 null；区分开来是因为诊断里不能把「本进程用户」说成「当前前台用户」。
+     */
+    private class UserInfo(val id: Int, val exact: Boolean)
+
+    private fun foregroundUser(): UserInfo? {
+        // 1. ActivityManager.getCurrentUser()：AOSP 的正解，只有它能说明「当前前台用户」。
+        try {
+            val activityManager = Class.forName("android.app.ActivityManager")
+            val getCurrentUser = activityManager.getMethod("getCurrentUser")
+            (getCurrentUser.invoke(null) as? Int)?.let { return UserInfo(it, exact = true) }
+        } catch (e: Exception) {
+            // 换下一条。
+        } catch (e: LinkageError) {
+            // 换下一条。
+        }
+        // 2. UserHandle.myUserId()：公开接口，安卓 4.1 起就有。
+        try {
+            val userHandle = Class.forName("android.os.UserHandle")
+            val myUserId = userHandle.getMethod("myUserId")
+            (myUserId.invoke(null) as? Int)?.let { return UserInfo(it, exact = false) }
+        } catch (e: Exception) {
+            // 换下一条。
+        } catch (e: LinkageError) {
+            // 换下一条。
+        }
+        // 3. 从本进程 uid 反推（一定有值，但只能代表本进程）。
+        return UserInfo(Process.myUid() / PER_USER_RANGE, exact = false)
     }
 
     /** 已配对设备数（读不到就返回「?」，不因为没有蓝牙权限就整条诊断失败）。 */

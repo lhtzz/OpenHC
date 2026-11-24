@@ -124,8 +124,9 @@ private fun wirelessEndText(context: Context, reason: WirelessEndReason): String
         else -> context.getString(R.string.wireless_end_auth_failed, reason.failure.toString())
     }
     is WirelessEndReason.Failed -> if (reason.step == SessionStep.BLUETOOTH && isListenFailure(reason.detail)) {
-        // 开监听就被系统拒了（安卓 4.4 上只有一句 Error: -1），不是手机的问题，给一句说得清的提示。
-        context.getString(R.string.wireless_end_bluetooth_listen, reason.detail)
+        // 开监听就被系统拒了（安卓 4.4 上只有一句 Error: -1），不是手机的问题。
+        // 结论已经写进诊断日志，界面上只给一句明确的处置办法，不把技术细节糊在用户脸上。
+        context.getString(R.string.wireless_end_bluetooth_listen)
     } else context.getString(
         when (reason.step) {
             SessionStep.BLUETOOTH -> R.string.wireless_end_step_bluetooth

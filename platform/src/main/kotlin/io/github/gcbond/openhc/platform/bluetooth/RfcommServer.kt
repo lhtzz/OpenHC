@@ -105,12 +105,15 @@ class RfcommServer(
         val opened = RfcommListeners.openWithServiceRecord(adapter, serviceName, uuid, cancelled = ::isListenerClosed)
         val listener = opened.socket
         if (listener == null) {
-            // 一种都不成：先给归因，再把车机蓝牙的现状和「按通道号开监听」的探针结果一起记进日志。
+            // 一种都不成：先给归因，再把车机蓝牙的现状和「按通道号开监听」的探针明细一起记进日志。
             // 光有「Error: -1」分不出是权限、多用户还是协议栈不支持。
             val probe = RfcommListeners.probeFixedChannels(adapter)
-            val reason = RfcommListeners.diagnose(adapter, probe)
+            val reason = RfcommListeners.diagnose(adapter, probe.conclusion, probe.detail)
             val env = RfcommListeners.environment(adapter)
-            android.util.Log.w(TAG, "开监听失败：试了 ${opened.rounds} 轮都没成（${opened.how}）；车机蓝牙：$env")
+            android.util.Log.w(
+                TAG,
+                "开监听失败：试了 ${opened.rounds} 轮都没成（${opened.how}）；探针：${probe.detail}；车机蓝牙：$env",
+            )
             return failListen("开监听失败：试了 ${opened.rounds} 轮共 3 种开法都没成。$reason")
         }
         val keep = synchronized(lock) {

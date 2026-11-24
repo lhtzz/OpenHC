@@ -154,4 +154,23 @@ class RfcommListenersTest {
         assertNull(opened.socket)
         assertEquals("Exception：系统里没有这种开法", opened.error)
     }
+
+    @Test
+    fun channelProbeDistinguishesMissingFromRefused() {
+        // 「反射找不到方法」和「方法找到了但调用失败」是两件完全不同的事，不能都报成「不行」。
+        assertEquals("系统里没有这个方法", RfcommListeners.ChannelProbe(null, missing = true, error = null).describe())
+        assertEquals("通道 3 可以", RfcommListeners.ChannelProbe(3, missing = false, error = null).describe())
+        assertEquals(
+            "全部通道都不行（IOException：Error: -1）",
+            RfcommListeners.ChannelProbe(null, missing = false, error = "IOException：Error: -1").describe(),
+        )
+    }
+
+    @Test
+    fun probeKeepsConclusionAndDetailApart() {
+        // 结论给用户看，明细写日志：明细里要能看出是哪一种失败。
+        val probe = RfcommListeners.Probe("按通道号开监听也不行", "不加密通道开法：全部通道都不行（Error: -1）")
+        assertEquals("按通道号开监听也不行", probe.conclusion)
+        assertTrue(probe.detail.contains("Error: -1"))
+    }
 }

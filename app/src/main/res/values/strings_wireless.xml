@@ -60,7 +60,7 @@
     <string name="wireless_end_not_trusted">手机要求免码回连，但车机上没有它的配对记录。请在手机上删除这台车机，再重新扫码配对。</string>
     <string name="wireless_end_auth_failed">认证失败（%1$s）</string>
     <string name="wireless_end_step_bluetooth">蓝牙连接失败（%1$s）</string>
-    <string name="wireless_end_bluetooth_listen">车机不让本应用开蓝牙监听通道（%1$s）。这台车机的蓝牙可能只给系统自带的「蓝牙音乐」用：请把诊断日志导出后发给我们。</string>
+    <string name="wireless_end_bluetooth_listen">这台车机的蓝牙不让本应用开监听通道，无线投屏用不了，请改用数据线连接。详细原因已写进诊断日志。</string>
     <string name="wireless_end_step_auth">认证失败（%1$s）</string>
     <string name="wireless_end_step_negotiation">和手机商量 WiFi 连接失败（%1$s）</string>
     <string name="wireless_end_reconnect">自动连接手机没成（%1$s）。可以点「开始无线连接」再试。</string>
