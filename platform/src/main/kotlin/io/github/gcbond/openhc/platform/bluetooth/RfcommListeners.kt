@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Process
 import android.util.Log
 import java.io.IOException
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.util.UUID
 
@@ -244,6 +245,13 @@ object RfcommListeners {
 
     // ---------------------------------------------------------------- 工具
 
+    /**
+     * 试一种开法。**任何**异常都要接住：这里是后台监听线程，抛出去就是进程崩溃（闪退）。
+     *
+     * 特别注意 [java.lang.reflect.InvocationTargetException]——`Method.invoke` 抛的是受检的 `Exception`，
+     * 不是 `RuntimeException`，漏掉它的话会一路穿过 [openWithRetry] 和监听线程把应用带崩。
+     * 反射调用被系统拒绝时，真正的原因在它的 cause 里，要拆出来记日志。
+     */
     private inline fun attempt(how: String, body: () -> BluetoothServerSocket?): Attempt = try {
         val socket = body()
         Attempt(how, socket, if (socket == null) "这台系统没有这种开法" else null)
@@ -251,8 +259,15 @@ object RfcommListeners {
         Attempt(how, null, describe(e))
     } catch (e: SecurityException) {
         Attempt(how, null, "没有蓝牙权限（${describe(e)}）")
-    } catch (e: RuntimeException) {
+    } catch (e: InvocationTargetException) {
+        // 反射调用里抛的异常（系统拒绝建通道时就是这个）。
+        val cause = e.cause ?: e
+        val permission = cause is SecurityException
+        Attempt(how, null, (if (permission) "没有蓝牙权限（" else "") + describe(cause) + (if (permission) "）" else ""))
+    } catch (e: Exception) {
         Attempt(how, null, describe(e))
+    } catch (e: LinkageError) {
+        Attempt(how, null, "系统里没有这个接口（${describe(e)}）")
     }
 
     /** 依次试 1～[MAX_CHANNEL] 号通道，开成第一个就立刻关掉并返回通道号；都不行返回 null。 */
@@ -261,11 +276,12 @@ object RfcommListeners {
         for (channel in 1..MAX_CHANNEL) {
             val socket = try {
                 invokeListenOnChannel(adapter, method, channel)
-            } catch (e: IOException) {
-                continue
             } catch (e: SecurityException) {
                 return null
-            } catch (e: RuntimeException) {
+            } catch (e: Exception) {
+                // 含反射包出来的 InvocationTargetException：这种通道号开不了，接着试下一个。
+                continue
+            } catch (e: LinkageError) {
                 continue
             } ?: continue
             try {
@@ -313,8 +329,6 @@ object RfcommListeners {
         field.get(adapter) != null
     } catch (e: Exception) {
         false
-    } catch (e: RuntimeException) {
-        false
     } catch (e: LinkageError) {
         false
     }
@@ -325,8 +339,6 @@ object RfcommListeners {
         val getCurrentUser = activityManager.getMethod("getCurrentUser")
         (getCurrentUser.invoke(null) as? Int)
     } catch (e: Exception) {
-        null
-    } catch (e: RuntimeException) {
         null
     } catch (e: LinkageError) {
         null

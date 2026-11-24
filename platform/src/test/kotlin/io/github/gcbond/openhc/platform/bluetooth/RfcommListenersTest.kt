@@ -117,4 +117,41 @@ class RfcommListenersTest {
         }
         assertTrue(failure.exceptionOrNull() is IllegalArgumentException)
     }
+
+    @Test
+    fun reflectionWrappedExceptionIsCaughtNotThrown() {
+        // 回归：反射调隐藏接口时 Method.invoke 抛的是受检的 InvocationTargetException，
+        // 以前只接 IOException / SecurityException / RuntimeException，它会一路穿到监听线程把应用带崩（闪退）。
+        val opened = RfcommListeners.openWithRetry(
+            openers = listOf(
+                "只加密监听" to {
+                    throw java.lang.reflect.InvocationTargetException(
+                        IOException("Error: -1"),
+                        "listenUsingEncryptedRfcommWithServiceRecord",
+                    )
+                },
+            ),
+            rounds = 2,
+            intervalMillis = 300L,
+            sleep = { },
+        )
+        assertNull(opened.socket)
+        assertEquals(2, opened.rounds)
+        // 真正的原因要从 cause 里拆出来，日志里才看得见。
+        assertEquals("IOException：Error: -1", opened.error)
+    }
+
+    @Test
+    fun anyOtherExceptionIsAlsoCaught() {
+        // 监听线程上抛任何异常都会杀进程，所以兜底要接 Throwable 级别的受检异常。
+        val opened = RfcommListeners.openWithRetry(
+            openers = listOf(
+                "不加密监听" to { throw Exception("系统里没有这种开法") },
+            ),
+            rounds = 1,
+            sleep = { },
+        )
+        assertNull(opened.socket)
+        assertEquals("Exception：系统里没有这种开法", opened.error)
+    }
 }

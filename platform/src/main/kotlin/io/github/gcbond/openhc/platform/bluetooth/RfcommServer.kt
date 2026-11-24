@@ -88,6 +88,18 @@ class RfcommServer(
     // 权限由调用方在开始前确认；没有时系统抛 SecurityException，下面按开监听失败上报。
     @SuppressLint("MissingPermission")
     private fun run() {
+        // 兜底：这是后台线程，任何漏掉的异常都会把整个进程带走（界面上就是闪退）。
+        // 真漏了也要先报成「开监听失败」，让界面有话说、诊断日志有记录。
+        try {
+            listenAndServe()
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "开监听线程出了意外：${describe(e)}", e)
+            if (e is InterruptedException) Thread.currentThread().interrupt()
+            failListen("开监听失败：内部错误（${describe(e)}）")
+        }
+    }
+
+    private fun listenAndServe() {
         // 几种开法轮着试，每轮之间等一会儿，最多 10 轮（见 RfcommListeners：AOSP 自己也是这么试的）。
         // 用户中途关监听就不再耗下去。
         val opened = RfcommListeners.openWithServiceRecord(adapter, serviceName, uuid, cancelled = ::isListenerClosed)
