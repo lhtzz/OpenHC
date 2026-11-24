@@ -97,6 +97,10 @@ class FileTrustStore private constructor(
         /**
          * 原子写：先写同目录下的临时文件并刷到磁盘，再改名覆盖目标（同一文件系统内的 rename 是原子的）。
          * 中途失败时目标文件保持原样，临时文件删掉。java.io 打不开目录，改名后没法再刷目录项，这一步省掉。
+         *
+         * 注意 `File.renameTo` 在 Windows 上不能覆盖已存在的目标（POSIX 可以），所以第一次改名失败、
+         * 且目标确实存在时，先删掉旧文件再改名。安卓上是 POSIX 语义，走不到那条分支；
+         * 这条分支是给在 Windows 上跑单元测试用的，删旧文件那一下不是原子的，但测试场景够用。
          */
         @Throws(IOException::class)
         internal fun writeAtomically(target: File, bytes: ByteArray) {
@@ -108,7 +112,11 @@ class FileTrustStore private constructor(
                     out.flush()
                     out.fd.sync()
                 }
-                if (!temp.renameTo(target)) throw IOException("把临时文件改名为 ${target.name} 失败")
+                if (!temp.renameTo(target)) {
+                    // Windows：目标已存在时 renameTo 会失败，先删掉再改名。
+                    if (target.exists() && target.delete() && temp.renameTo(target)) return
+                    throw IOException("把临时文件改名为 ${target.name} 失败")
+                }
             } catch (e: IOException) {
                 temp.delete()
                 throw e

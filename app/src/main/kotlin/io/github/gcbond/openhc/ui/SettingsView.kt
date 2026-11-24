@@ -723,13 +723,47 @@ internal class SettingsView(context: Context) : ScrollView(context) {
     // ---------- 诊断 ----------
 
     private fun diagnosticGroup(): View {
-        val row = settingsRow(
+        val view = settingsRow(
             context,
             context.getString(R.string.settings_log_open),
             context.getString(R.string.settings_log_summary),
             actionButton(context, context.getString(R.string.settings_log_open)) { openDiagnosticLog() },
         )
-        return settingsGroup(context, context.getString(R.string.settings_group_diagnostic), listOf(row))
+        // 日志写在应用私有目录里（别的应用和文件管理器进不去），所以要给一条路把它弄出来：
+        // 安卓 4.4 起用系统的「另存为」挑目录，4.1～4.3 直接落到外置存储的 OpenHC/ 目录。
+        val exportSummary = if (io.github.gcbond.openhc.settings.LogExport.canSaveToChosenFolder()) {
+            context.getString(R.string.settings_log_export_summary)
+        } else {
+            context.getString(R.string.settings_log_path, "/sdcard/OpenHC/")
+        }
+        val export = settingsRow(
+            context,
+            context.getString(R.string.settings_log_export),
+            exportSummary,
+            actionButton(context, context.getString(R.string.settings_log_export)) { exportDiagnosticLog() },
+        )
+        val share = settingsRow(
+            context,
+            context.getString(R.string.log_share),
+            context.getString(R.string.log_share_subject),
+            actionButton(context, context.getString(R.string.log_share)) {
+                io.github.gcbond.openhc.settings.LogExport.share(context)
+            },
+        )
+        return settingsGroup(
+            context,
+            context.getString(R.string.settings_group_diagnostic),
+            listOf(view, export, share),
+        )
+    }
+
+    /** 导出日志：有「另存为」就交给系统让用户挑目录，没有就直接写外置存储。 */
+    private fun exportDiagnosticLog() {
+        val activity = context as? Activity
+        if (activity != null && io.github.gcbond.openhc.settings.LogExport.launchSave(activity)) return
+        // 安卓 4.1～4.3 没有「另存为」界面，直接写到 /sdcard/OpenHC/。
+        val message = io.github.gcbond.openhc.settings.LogExport.saveToLegacyDir(context)
+        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
     }
 
     private fun openDiagnosticLog() {
@@ -749,8 +783,10 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         )
         android.app.AlertDialog.Builder(context)
             .setTitle(R.string.settings_log_open)
+            .setMessage(context.getString(R.string.settings_log_path, io.github.gcbond.openhc.settings.DiagnosticLog.location()))
             .setView(scroll)
             .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.log_export) { _, _ -> exportDiagnosticLog() }
             .show()
     }
 

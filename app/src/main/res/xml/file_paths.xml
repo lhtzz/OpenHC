@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    分享诊断日志时用 FileProvider 授权缓存里的副本。只开放 cacheDir/logs 一个子目录，
+    不暴露私有目录里的其他文件（连接参数、信任库等）。
+-->
+<paths>
+    <cache-path name="logs" path="logs/" />
+</paths>

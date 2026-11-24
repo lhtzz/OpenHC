@@ -25,6 +25,7 @@ import io.github.gcbond.openhc.platform.net.VpnConsent
 import io.github.gcbond.openhc.projection.ProjectionView
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
+import io.github.gcbond.openhc.settings.LogExport
 import io.github.gcbond.openhc.startup.BootStart
 import io.github.gcbond.openhc.startup.BootStartPolicy
 import io.github.gcbond.openhc.ui.HomeActions
@@ -418,6 +419,12 @@ class MainActivity : Activity() {
     @Deprecated("安卓 4.x 上没有 Activity Result API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        // 设置页「导出日志」：系统「另存为」界面选完目录回来，把日志写进去。
+        if (requestCode == LogExport.REQ_SAVE) {
+            val uri = if (resultCode == RESULT_OK) data?.data else null
+            Toast.makeText(this, LogExport.finishSave(this, uri), Toast.LENGTH_LONG).show()
+            return
+        }
         if (requestCode != REQ_VPN) return
         val kind = pendingStart
         pendingStart = null

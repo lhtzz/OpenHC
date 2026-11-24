@@ -29,8 +29,11 @@
     <string name="settings_group_diagnostic">诊断</string>
     <string name="settings_log_open">查看连接日志</string>
     <string name="settings_log_summary">连不上、没声音、中途断开时，把这份日志发出来就能定位</string>
+    <string name="settings_log_export">导出日志</string>
+    <string name="settings_log_export_summary">存到车机上指定的文件夹（U 盘也行），或直接分享给别人</string>
+    <string name="settings_log_path">日志位置：%1$s</string>
     <string name="log_title">连接日志</string>
-    <string name="log_hint">下面是应用自己记的连接过程（不记画面和密钥）。可以用「分享」直接发出去，或「复制」后粘贴到别处。</string>
+    <string name="log_hint">下面是应用自己记的连接过程（不记画面和密钥）。可以用「分享」直接发出去，或「导出到文件夹」存到车机上。</string>
     <string name="log_refresh">刷新</string>
     <string name="log_clear">清空</string>
     <string name="log_cleared">日志已清空</string>
@@ -38,4 +41,10 @@
     <string name="log_copied">已复制到剪贴板</string>
     <string name="log_share">分享</string>
     <string name="log_share_failed">没有可用来分享的应用</string>
+    <string name="log_share_subject">OpenHC 连接日志</string>
+    <string name="log_export">导出到文件夹</string>
+    <string name="log_export_done">已导出到 %1$s</string>
+    <string name="log_export_cancelled">没有选保存位置，日志没导出</string>
+    <string name="log_export_empty">日志还是空的，没有可导出的内容</string>
+    <string name="log_export_failed">导出失败：%1$s</string>
 </resources>

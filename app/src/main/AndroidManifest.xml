@@ -82,6 +82,14 @@
         android:name="android.hardware.usb.host"
         android:required="false" />
 
+    <!--
+        安卓 4.1～4.3 没有系统的「另存为」界面，导出诊断日志只能直接写外置存储（/sdcard/OpenHC/）。
+        这三版上这个权限安装即授予，不用运行时申请。安卓 4.4 起改走「另存为」，不需要它。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="18" />
+
     <!-- 比亚迪车机「选择禁止后台启动项」对话框：安卓 11 起要声明，才查得到车机上有没有它（设置 → 启动）。 -->
     <queries>
         <intent>
@@ -168,5 +176,20 @@
                 <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
             </intent-filter>
         </receiver>
+
+        <!--
+            「分享」诊断日志时把缓存里的副本授权给接收方（微信、蓝牙、邮件）。
+            只开放 cacheDir/logs 这一个子目录，不暴露私有目录里的连接参数、信任库等文件。
+            authorities 要和 LogExport.authority() 一致。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.logfiles"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
