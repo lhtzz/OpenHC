@@ -32,6 +32,9 @@
     <string name="settings_log_export">导出日志</string>
     <string name="settings_log_export_summary">存到车机上指定的文件夹（U 盘也行），或直接分享给别人</string>
     <string name="settings_log_path">日志位置：%1$s</string>
+    <string name="settings_bluetooth_test">蓝牙自检</string>
+    <string name="settings_bluetooth_test_running">正在检查车机蓝牙…</string>
+    <string name="settings_bluetooth_test_summary">无线连接一开始就失败时，先点这个看车机给不给开蓝牙监听</string>
     <string name="log_title">连接日志</string>
     <string name="log_hint">下面是应用自己记的连接过程（不记画面和密钥）。可以用「分享」直接发出去，或「导出到文件夹」存到车机上。</string>
     <string name="log_refresh">刷新</string>

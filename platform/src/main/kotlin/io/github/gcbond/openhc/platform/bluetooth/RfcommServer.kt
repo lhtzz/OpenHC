@@ -11,8 +11,11 @@ import java.util.UUID
 import java.util.concurrent.LinkedBlockingQueue
 
 /**
- * 经典蓝牙 RFCOMM 服务端：不加密、不要求认证，带服务记录（SDP 里登记 [uuid]；服务名 [serviceName] 随意，手机不看），
- * 只接受一条连接。无线连接的蓝牙控制通道、认证子通道各用一个。
+ * 经典蓝牙 RFCOMM 服务端：带服务记录（SDP 里登记 [uuid]；服务名 [serviceName] 随意，手机不看），只接受一条连接。
+ * 无线连接的蓝牙控制通道、认证子通道各用一个。
+ *
+ * 默认用「不加密、不要求认证」的开法；有的车机只拒这一种，会依次退到「只加密」「加密+认证」，
+ * 见 [RfcommListeners]。都开不了时报上去的说明里带着车机蓝牙的现状和探针结果，便于判断原因。
  *
  * 线程：[start] 之后一个线程依次「开监听 → 读通道号（[RfcommChannel]）→ onListening → accept → onAccepted → 读」，
  * 回调都在这个线程上按顺序发生；写在另一个线程上排队按顺序做，[write] 不阻塞。
@@ -85,25 +88,26 @@ class RfcommServer(
     // 权限由调用方在开始前确认；没有时系统抛 SecurityException，下面按开监听失败上报。
     @SuppressLint("MissingPermission")
     private fun run() {
-        val opened = try {
-            adapter.listenUsingInsecureRfcommWithServiceRecord(serviceName, uuid)
-        } catch (e: IOException) {
-            return failListen("开监听失败：${describe(e)}")
-        } catch (e: SecurityException) {
-            return failListen("没有蓝牙权限（安卓 12 起要「附近的设备」权限）：${describe(e)}")
-        } catch (e: RuntimeException) {
-            return failListen("开监听失败：${describe(e)}")
+        // 几种开法依次试（见 RfcommListeners）：有的车机只拒「不加密监听」，换一种就通了。
+        val opened = RfcommListeners.openWithServiceRecord(adapter, serviceName, uuid)
+        val listener = opened.socket
+        if (listener == null) {
+            // 一种都不成：把车机蓝牙的现状和「按通道号开监听」的探针结果一起报上去，
+            // 光有「Error: -1」分不出是权限、多用户还是协议栈不支持。
+            val env = RfcommListeners.environment(adapter)
+            val probe = RfcommListeners.probeFixedChannels(adapter)
+            return failListen("开监听失败：${opened.how}；车机蓝牙：$env；$probe")
         }
         val keep = synchronized(lock) {
-            if (!listenerClosed) server = opened
+            if (!listenerClosed) server = listener
             !listenerClosed
         }
-        if (!keep) return closeQuietly(opened)
-        val channel = RfcommChannel.read(opened)
+        if (!keep) return closeQuietly(listener)
+        val channel = RfcommChannel.read(listener)
         if (!isListenerClosed()) events.onListening(channel)
 
         val client = try {
-            opened.accept()
+            listener.accept()
         } catch (e: IOException) {
             if (!isListenerClosed()) events.onListenFailed("等连接时出错：${describe(e)}")
             return

@@ -123,7 +123,10 @@ private fun wirelessEndText(context: Context, reason: WirelessEndReason): String
         AuthFailure.NotTrusted -> context.getString(R.string.wireless_end_not_trusted)
         else -> context.getString(R.string.wireless_end_auth_failed, reason.failure.toString())
     }
-    is WirelessEndReason.Failed -> context.getString(
+    is WirelessEndReason.Failed -> if (reason.step == SessionStep.BLUETOOTH && isListenFailure(reason.detail)) {
+        // 开监听就被系统拒了（安卓 4.4 上只有一句 Error: -1），不是手机的问题，给一句说得清的提示。
+        context.getString(R.string.wireless_end_bluetooth_listen, reason.detail)
+    } else context.getString(
         when (reason.step) {
             SessionStep.BLUETOOTH -> R.string.wireless_end_step_bluetooth
             SessionStep.AUTH -> R.string.wireless_end_step_auth
@@ -137,6 +140,12 @@ private fun wirelessEndText(context: Context, reason: WirelessEndReason): String
         if (reason.needsPairing) context.getString(R.string.wireless_end_reconnect_pairing) else context.getString(R.string.wireless_end_reconnect, reason.detail)
     is WirelessEndReason.InternalError -> context.getString(R.string.wireless_end_internal, reason.message)
 }
+
+/**
+ * 结束原因是不是「开监听就被系统拒了」：平台层报的说明以「开监听失败」开头
+ * （见 RfcommServer，失败时后面还带着车机蓝牙的现状和探针结论）。
+ */
+private fun isListenFailure(detail: String): Boolean = detail.contains("开监听失败")
 
 /** 这次连接里 BLE 广播的情况；停了不显示。 */
 internal fun wirelessBeaconText(context: Context, status: BeaconStatus): String? = when (status) {

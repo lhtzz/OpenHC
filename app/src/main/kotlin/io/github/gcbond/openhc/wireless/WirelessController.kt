@@ -41,6 +41,7 @@ import io.github.gcbond.openhc.input.MediaKeys
 import io.github.gcbond.openhc.platform.bluetooth.BleBeacon
 import io.github.gcbond.openhc.platform.bluetooth.BluetoothStatus
 import io.github.gcbond.openhc.platform.bluetooth.RfcommClient
+import io.github.gcbond.openhc.platform.bluetooth.RfcommListeners
 import io.github.gcbond.openhc.platform.bluetooth.RfcommServer
 import io.github.gcbond.openhc.platform.media.VideoDecoder
 import io.github.gcbond.openhc.platform.wifi.LocalHotspotOwner
@@ -516,6 +517,8 @@ class WirelessController(
                 "广播 ${beacon?.let { "开（重新发布 ${it.republishMillis / 1000} 秒，GATT ${if (it.gatt) "开" else "关"}${if (it.declareRandomAddress) "，声明随机地址" else ""}）" } ?: "不发"}",
         )
         DiagnosticLog.log(TAG, "第 ${current.id} 次无线连接的清晰度：${clarity.key}，声明码率 ${VideoClarity.describe(config.display.bitrate)}")
+        // 蓝牙的现状一起记下来：开监听失败时（安卓 4.4 上只报「Error: -1」）要靠这几项判断是权限、多用户还是协议栈不支持。
+        DiagnosticLog.log(TAG, "第 ${current.id} 次无线连接的蓝牙现状：${RfcommListeners.environment(adapter)}")
         setAutoHold(null)
         apply(
             WirelessSignal.AttemptStarted(

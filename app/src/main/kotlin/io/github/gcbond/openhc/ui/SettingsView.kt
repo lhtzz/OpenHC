@@ -750,11 +750,42 @@ internal class SettingsView(context: Context) : ScrollView(context) {
                 io.github.gcbond.openhc.settings.LogExport.share(context)
             },
         )
+        val bluetooth = settingsRow(
+            context,
+            context.getString(R.string.settings_bluetooth_test),
+            context.getString(R.string.settings_bluetooth_test_summary),
+            actionButton(context, context.getString(R.string.settings_bluetooth_test)) { runBluetoothTest() },
+        )
         return settingsGroup(
             context,
             context.getString(R.string.settings_group_diagnostic),
-            listOf(view, export, share),
+            listOf(view, export, share, bluetooth),
         )
+    }
+
+    /**
+     * 蓝牙能力自检：不开连接、不连手机，直接把「开 RFCOMM 监听」这件事试一遍，看这台车机给不给开。
+     * 安卓 4.4 上失败只有一句 `Error: -1`，所以要一次把几种开法和环境都试出来，结果直接显示给用户看。
+     */
+    private fun runBluetoothTest() {
+        // 开监听、试通道号都要走系统蓝牙服务，最坏情况要几秒，放后台线程，别卡住界面。
+        val handler = Handler(Looper.getMainLooper())
+        Toast.makeText(context, R.string.settings_bluetooth_test_running, Toast.LENGTH_SHORT).show()
+        Thread({
+            val result = try {
+                io.github.gcbond.openhc.platform.bluetooth.RfcommListeners.selfTest(context)
+            } catch (e: Exception) {
+                "自检出错：${e.javaClass.simpleName}：${e.message}"
+            }
+            io.github.gcbond.openhc.settings.DiagnosticLog.log("OpenHC-Wireless", "蓝牙自检：$result")
+            handler.post {
+                android.app.AlertDialog.Builder(context)
+                    .setTitle(R.string.settings_bluetooth_test)
+                    .setMessage(result)
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+            }
+        }, "OpenHC-BluetoothTest").start()
     }
 
     /** 导出日志：有「另存为」就交给系统让用户挑目录，没有就直接写外置存储。 */

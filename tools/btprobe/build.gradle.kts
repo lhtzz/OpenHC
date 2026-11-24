@@ -17,7 +17,9 @@ android {
 
     defaultConfig {
         applicationId = "io.github.gcbond.openhc.btprobe"
-        minSdk = libs.versions.minSdk.get().toInt()
+        // 界面是 Compose（material3 最低 API 21），不跟主应用的 minSdk（本分支降到 16 支持安卓 4.1）。
+        // 探针是独立的调试工具，只用来在真机上试隐藏接口，跟着 Compose 的下限走就行。
+        minSdk = 21
         versionCode = 1
         versionName = "0.1.0"
     }
