@@ -289,7 +289,7 @@ class ConnectionController(context: Context) {
         val bluetooth = BluetoothAddressPolicy.choose(DeviceInfo.systemBluetoothAddress(app), settings.manualBluetoothAddress)
         val fullScreen = settings.fullScreen
         val display = try {
-            DisplayPlan.resolve(DisplayArea.screenFor(app, fullScreen), ResolutionChoice.Auto, settings.fps)
+            DisplayPlan.resolve(DisplayArea.screenFor(app, fullScreen), ResolutionChoice.Auto, settings.fps, settings.uiScalePercent)
         } catch (e: IllegalArgumentException) {
             return block(Notice.StartFailed("屏幕参数不对：${e.message}"))
         }
@@ -329,7 +329,7 @@ class ConnectionController(context: Context) {
         Log.i(
             TAG,
             "第 ${current.id} 次连接：蓝牙地址来源 ${bluetooth.source}，deviceId ${config.deviceId.take(4)}…，" +
-                "画布 ${display.width}x${display.height}@${display.fps} dpi ${display.dpi} GOP ${display.gop}" +
+                "画布 ${display.width}x${display.height}@${display.fps} dpi ${display.dpi}（界面大小 ${settings.uiScalePercent}%）GOP ${display.gop}" +
                 "（全屏${if (DisplayArea.activeFullScreen) "开" else "关，让出底部导航栏 ${DisplayArea.navigationBarHeight(app)} 像素"}），控制端口 $port，" +
                 "已配对手机 ${trustStore.peerCount} 台，USB 授权宽限 ${grace}ms",
         )
@@ -416,6 +416,12 @@ class ConnectionController(context: Context) {
         @Volatile
         var videoDecoder: VideoDecoder? = null
 
+        /**
+         * 保护 [videoDecoder]：协议线程建、调度线程收尾时关，两边都在这把锁里改。收尾在关执行器之前就置了 tearingDown，
+         * 但执行器关闭超时、被强行放弃时协议线程可能还在建解码器；靠这把锁保证建了的一定被收尾关掉，收尾之后不再建。
+         */
+        val decoderLock = Any()
+
         /** 解码器选项（上屏节拍开关），开始连接时在调度线程上读一次设置。 */
         val videoOptions: VideoDecoder.Options = VideoPreferences(app).decoderOptions()
 
@@ -441,16 +447,22 @@ class ConnectionController(context: Context) {
             is SessionEvent.VideoNegotiated -> prepareDecoder(current, event.video)
             // 结束原因按发生的先后记，不等调度线程排到。
             is SessionEvent.Ended -> current.causes.onSessionEnded(event.reason)
+            // 回车机桌面（点「车机」图标）：在协议线程上直接投给界面层，不等调度线程。
+            is SessionEvent.DeviceSessionReady -> CarHome.onDeviceSessionReady()
+            SessionEvent.ProjectionPaused -> CarHome.onProjectionPaused("有线 #${current.id}")
             else -> Unit
         }
         post { onSessionEvent(current, event) }
     }
 
     private fun prepareDecoder(current: Attempt, video: VideoParameters) {
-        val decoder = current.videoDecoder ?: VideoDecoder(DecoderListener(current.id), current.videoOptions).also {
-            current.videoDecoder = it
-            current.sink.target = it
-            mutableDecoder.value = it
+        val decoder = synchronized(current.decoderLock) {
+            if (current.tearingDown) return
+            current.videoDecoder ?: VideoDecoder(DecoderListener(current.id), current.videoOptions).also {
+                current.videoDecoder = it
+                current.sink.target = it
+                mutableDecoder.value = it
+            }
         }
         // 有视频流了：让音频改用薄缓冲。视频解码到上屏只要 13ms，音频厚缓冲却要 1000ms，
         // 差一秒就是音画不同步（实测安卓 9 车机播视频时很明显）。
@@ -600,10 +612,13 @@ class ConnectionController(context: Context) {
         current.audio.close()
         current.mic.close()
         // 2. 解码器：执行器已经停了，不会再有帧送进来。
-        current.sink.target = null
-        current.videoDecoder?.close()
-        current.videoDecoder = null
-        mutableDecoder.value = null
+        // 执行器停了就不会再有帧送进来；关闭超时、强行放弃时协议线程可能还在建，见 [Attempt.decoderLock]。
+        val decoder = synchronized(current.decoderLock) {
+            current.sink.target = null
+            mutableDecoder.value = null
+            current.videoDecoder.also { current.videoDecoder = null }
+        }
+        decoder?.close()
         // 3. 有线链路：稍等一下，让 TEARDOWN 和关连接的包经 TUN、USB 发到手机，再停。
         val wired = current.wired
         if (wired != null && !current.wiredEnded) {

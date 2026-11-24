@@ -6,6 +6,15 @@
     <string name="settings_wireless_restore">退出后恢复车机 WiFi（默认关）</string>
     <string name="settings_wireless_restore_hint">无线连接结束、热点关掉以后，如果车机 WiFi 是因为开热点才断开的，就把它打开。安卓 10 起应用不能自己打开 WiFi：车机 WiFi 没有自己恢复时，首页顶上会提示你去系统里打开。</string>
 
+    <!-- 车机自带热点（安卓 4.x～7.x 上反射开热点成功率低，用车主自己开的热点最稳） -->
+    <string name="settings_car_hotspot">用「车机自带热点」（默认关）</string>
+    <string name="settings_car_hotspot_hint">先在车机设置里打开车机自带的热点，再把热点名和密码填在下面。开着这一项时，OpenHC 不再自己开热点（也就不会把车机 WiFi 挤断）。适合自己开热点老失败的车型。</string>
+    <string name="settings_car_hotspot_name">热点名称</string>
+    <string name="settings_car_hotspot_password">热点密码</string>
+    <string name="settings_car_hotspot_5g">热点开在 5 GHz（默认开；关掉按 2.4 GHz 报给手机）</string>
+    <string name="settings_car_hotspot_save">保存热点信息</string>
+    <string name="settings_car_hotspot_saved">已保存</string>
+
     <!-- 首页无线卡片 -->
     <string name="wireless_network_line">无线方式：车机开热点。手机连上来时，车机原来连着的 WiFi 会断开。</string>
     <string name="wireless_hint_negotiating_hotspot">认证成功，车机正在开热点，和手机商量 WiFi…</string>

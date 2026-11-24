@@ -176,7 +176,7 @@ private class FileAudioCapture(private val dir: File, private val attemptId: Int
         is AudioEvent.Note -> event.stream
         is AudioEvent.Ended -> event.stream
         is AudioEvent.PhoneFocus, is AudioEvent.SpeakerDeclared, is AudioEvent.CarFocusSent, is AudioEvent.CodecVerdict,
-        is AudioEvent.PhoneCallState, is AudioEvent.PhoneVoiceState -> null
+        is AudioEvent.PhoneCallState, is AudioEvent.PhoneVoiceState, is AudioEvent.TransportFallback -> null
     }
 
     companion object {

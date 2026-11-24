@@ -2,6 +2,8 @@ package io.github.gcbond.openhc.settings
 
 import android.content.Context
 import androidx.core.content.edit
+import io.github.gcbond.openhc.platform.wifi.CarHotspotSettings
+import io.github.gcbond.openhc.platform.wifi.WifiBand
 
 /**
  * 无线连接方式与自动连接手机的设置（单独一个 SharedPreferences 文件）。开关切换立即生效。
@@ -25,6 +27,38 @@ class WirelessPreferences(context: Context) {
     var connectOnBluetooth: Boolean
         get() = prefs.getBoolean(KEY_CONNECT_ON_BLUETOOTH, true)
         set(value) = prefs.edit { putBoolean(KEY_CONNECT_ON_BLUETOOTH, value) }
+
+    /**
+     * 无线方式选「车机自带热点」（试验，默认关）：车主先在车机设置里打开车机自带的热点，OpenHC 不开本地热点，
+     * 用车主填的热点名、密码和频段（[carHotspotSettings]）。安卓 4.x～7.x 上反射开热点成功率低，走这条路最稳。
+     */
+    var carHotspot: Boolean
+        get() = prefs.getBoolean(KEY_CAR_HOTSPOT, false)
+        set(value) = prefs.edit { putBoolean(KEY_CAR_HOTSPOT, value) }
+
+    /** 车机自带热点的名称（车主填的，原样）。 */
+    var carHotspotName: String
+        get() = prefs.getString(KEY_CAR_HOTSPOT_NAME, null).orEmpty()
+        set(value) = prefs.edit { putString(KEY_CAR_HOTSPOT_NAME, value) }
+
+    /** 车机自带热点的密码（车主填的，原样；不写日志）。 */
+    var carHotspotPassword: String
+        get() = prefs.getString(KEY_CAR_HOTSPOT_PASSWORD, null).orEmpty()
+        set(value) = prefs.edit { putString(KEY_CAR_HOTSPOT_PASSWORD, value) }
+
+    /** 车机自带热点开在 5 GHz（默认）还是 2.4 GHz：报给手机的频率按它推测。 */
+    var carHotspotFiveGhz: Boolean
+        get() = prefs.getBoolean(KEY_CAR_HOTSPOT_5G, true)
+        set(value) = prefs.edit { putBoolean(KEY_CAR_HOTSPOT_5G, value) }
+
+    /** 下一次无线连接用的车机自带热点；没选这种方式、或名称密码没填时为 null。 */
+    fun carHotspotSettings(): CarHotspotSettings? {
+        if (!carHotspot) return null
+        val name = carHotspotName
+        val password = carHotspotPassword
+        if (name.isEmpty() || password.isEmpty()) return null
+        return CarHotspotSettings(name, password, if (carHotspotFiveGhz) WifiBand.GHZ_5 else WifiBand.GHZ_2)
+    }
 
     /** 用无线连成功过（投屏开始过）的手机的蓝牙地址（大写），最近连成功的在最后。「自动连接手机」只拨这些手机。 */
     val knownPhoneList: List<String>
@@ -92,5 +126,9 @@ class WirelessPreferences(context: Context) {
         private const val KEY_REPUBLISH_SECONDS = "debug_beacon_republish_seconds"
         private const val KEY_RANDOM_ADDRESS = "debug_beacon_random_address"
         private const val KEY_GATT = "debug_beacon_gatt"
+        private const val KEY_CAR_HOTSPOT = "car_hotspot"
+        private const val KEY_CAR_HOTSPOT_NAME = "car_hotspot_name"
+        private const val KEY_CAR_HOTSPOT_PASSWORD = "car_hotspot_password"
+        private const val KEY_CAR_HOTSPOT_5G = "car_hotspot_5g"
     }
 }

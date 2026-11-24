@@ -44,6 +44,9 @@ internal class Capabilities(private val config: HiSightConfig) {
     private var inputVendors: List<String> = emptyList()
     private var sourceDeviceType: Int? = null
 
+    /** 手机的输入选择用不了（没选、选得不对），这次不发触控和按键。 */
+    private var inputOff = false
+
     /** 按查询顺序拼应答；查询了但没实现的名字直接省略，不声称支持。 */
     fun responseBody(query: ByteArray): String {
         val supported = HashMap<String, String>()
@@ -78,185 +81,229 @@ internal class Capabilities(private val config: HiSightConfig) {
         return items.joinToString(";")
     }
 
-    /** 校验一次能力选择（不含触发命令）。没有 `his_video_formats` 时只更新输入选择。 */
-    fun select(fields: Map<String, String>) {
-        if (fields.isEmpty() ||
-            fields.keys.any { it !in ParameterText.CAPABILITY_FIELDS && it !in ParameterText.METADATA_FIELDS }
-        ) {
-            throw MalformedMessageException("能力选择为空或含未实现字段")
+    /**
+     * 校验一次能力选择（不含触发命令）。没有 `his_video_formats` 时只更新输入选择。
+     * 返回要写进诊断日志的说明（没有就是空表）。
+     *
+     * 音频、扩展媒体能力：车机不声明（声音走 DMSDP），但鸿蒙 3.0 / 4.x 的手机仍会选（2026-11 用户报告和实机），
+     * 照常接受、把选的值写进说明，这条连接不按它处理。
+     */
+    fun select(fields: Map<String, String>): List<String> {
+        val notes = ArrayList<String>(1)
+        if (fields.isEmpty()) throw MalformedMessageException("能力选择为空")
+        val unknown = fields.keys.filter { it !in ParameterText.CAPABILITY_FIELDS && it !in ParameterText.METADATA_FIELDS }
+        if (unknown.isNotEmpty()) notes += "能力选择里有不认识的字段（${unknown.joinToString("、") { shown(it) }}），不按它们处理"
+        fields["his_version"]?.let {
+            if (!isAcceptedVersion(it)) notes += "手机报的投屏版本是「${shown(it)}」（车机声明 1.1），按 1.1 的流程继续"
         }
-        fields["his_version"]?.let { if (!isAcceptedVersion(it)) throw MalformedMessageException("手机版本不是 1.0 或 1.1") }
-        // his_audio_codecs 只识别不使用：投屏层不声明、也不处理音频（声音走 DMSDP 的音频通道），
-        // 但有的手机（实测鸿蒙 4.2）会在这条选择里把它带回来，内容不是 none。这只是它多说的能力，
-        // 不影响视频、输入、加密的任何一项，不该因此断掉整个投屏，所以直接忽略。
+        fields["his_audio_codecs"]?.let {
+            if (it.lowercase() != "none") {
+                notes += "手机选了投屏通道上的音频「${shown(it)}」（车机没声明），照常继续；这条连接不从投屏通道收声音"
+            }
+        }
 
         var events = inputEvents
         var vendors = inputVendors
+        var off = inputOff
         val uibc = fields["his_uibc_capability"]
         if (advertisedEvents.isNotEmpty()) {
             // 只声明了可选的按键事件时，手机不选（不给或给 none）只是这次没有媒体键。
             val optionalOnly = requiredEvents.isEmpty() && advertisedVendors.isEmpty()
-            if (uibc == null || (optionalOnly && uibc.lowercase() == "none")) {
-                if (!optionalOnly) throw MalformedMessageException("手机没有选择已声明的输入能力")
+            if (uibc == null || uibc.lowercase() == "none") {
+                if (!optionalOnly) notes += "手机没有选择输入能力，这次不能触控"
                 events = emptyList()
                 vendors = emptyList()
+                off = !optionalOnly
             } else {
-                val chosen = inputSelection(uibc)
-                events = chosen.first
-                vendors = chosen.second
+                try {
+                    val chosen = inputSelection(uibc, notes)
+                    events = chosen.first
+                    vendors = chosen.second
+                    off = false
+                } catch (e: MalformedMessageException) {
+                    notes += "手机的输入选择用不了（${e.message}：${shown(uibc)}），这次不能触控"
+                    events = emptyList()
+                    vendors = emptyList()
+                    off = true
+                }
             }
         } else if (uibc != null && uibc.lowercase() != "none") {
-            throw MalformedMessageException("手机选择了未声明的输入能力")
+            notes += "手机选了输入能力「${shown(uibc)}」（车机没声明），不按它处理"
         }
-        // his_media_capability / his_vtp / his_feature：本端声明的是**空集合**，手机却会把自己支持的能力一并
-        // 回传。它们只描述手机自己具备什么，不改变本端要处理的事件集合——真正的输入协商走 his_uibc_capability，
-        // 视频参数走 his_video_formats，二者都照常严格校验。拒绝只会让这类手机连不上（鸿蒙 4.2 实测三处都会带）。
-        //
-        // his_feature 的 `input_feature_set` 只用于声明"本端实现了哪些可选输入功能"；本端一个都没实现，
-        // 所以声明为空。手机回 1, 101, 102… 是它自己支持的清单，不是要求本端实现，忽略即可。
-        // 如果哪天本端真的实现了某个编号的功能，才需要在这里改成"手机必须选中该编号"。
+        fields["his_media_capability"]?.let {
+            val v = it.lowercase()
+            if (v != "" && v != "none") notes += "手机选了扩展媒体能力「${shown(it)}」（车机没声明），照常继续，不按它处理"
+        }
+        fields["his_vtp"]?.let {
+            notes += "手机选了 VTP「${shown(it)}」（车机没声明、也不支持），照常按 TCP 收视频"
+        }
+        fields["his_feature"]?.let {
+            if (it != "input_feature_set=;") notes += "手机选了输入功能「${shown(it)}」（车机没声明），照常继续，不按它处理"
+        }
 
         var source = sourceDeviceType
         val deviceValue = fields["his_device_type"]
-        if (config.deviceType == 5 && deviceValue == null) throw MalformedMessageException("手机没有选回接收端类型 5")
-        var device: Map<String, Int>? = null
+        if (config.deviceType == 5 && deviceValue == null) notes += "手机没有选回接收端类型 5，照常继续"
         if (deviceValue != null) {
-            val parsed = ParameterText.integerFields(deviceValue, DEVICE_FIELDS)
-            if ((parsed["device_type"] ?: 4) != config.deviceType || (parsed["subtype"] ?: 0) != 0) {
-                throw MalformedMessageException("手机选择的接收端类型与声明不符")
+            val parsed = lenientIntegers(deviceValue, DEVICE_FIELDS, notes, "接收端类型")
+            if ((parsed["device_type"] ?: config.deviceType) != config.deviceType || (parsed["subtype"] ?: 0) != 0) {
+                notes += "手机选的接收端类型「${shown(deviceValue)}」与声明不符，照常继续"
             }
             source = parsed["source_device_type"] ?: source
-            device = parsed
         }
-        // 按键包按源设备类型 7 编码（安卓键码），每次选择都必须明确给出。只声明了媒体键时不要求：
-        // 没有 7 时编码器只放行基础键、修饰位为 0，这组键在两种源设备类型下字节相同。
-        if (config.keyInput && (device == null || device["source_device_type"] != 7)) {
-            throw MalformedMessageException("按键输入要求手机明确选择 source_device_type 7")
-        }
+        // 按键包按源设备类型 7 编码（安卓键码）；没有 7 时编码器只放行基础键、修饰位为 0。
+        if (config.keyInput && source != 7) notes += "手机没有选源设备类型 7，按键只发基础键"
 
         val formats = fields["his_video_formats"]
         if (formats == null) {
             inputEvents = events
             inputVendors = vendors
+            inputOff = off
             sourceDeviceType = source
-            return
+            return notes
         }
-        val video = ParameterText.integerFields(formats, VIDEO_FIELDS, ECHO_ONLY_VIDEO_FIELDS)
-        val width = video["width"]
-        val height = video["height"]
-        val fps = video["fps"]
-        if (video["codecs"] != 1 || width == null || height == null || fps == null) {
-            throw MalformedMessageException("手机没有明确选择 H.264、尺寸和帧率")
+        val video = lenientIntegers(formats, VIDEO_FIELDS, notes, "视频格式")
+        val codecs = video["codecs"]
+        if (codecs == null) notes += "手机的视频格式没写编码，按 H.264 收"
+        if (codecs != null && codecs != 1) throw MalformedMessageException("手机选了 H.264 以外的视频编码（codecs $codecs），车机解不了")
+        var width = video["width"]?.takeIf { it > 0 }
+        var height = video["height"]?.takeIf { it > 0 }
+        if (width == null || height == null) {
+            notes += "手机的视频格式没写有效的尺寸，按声明的 ${config.videoWidth}x${config.videoHeight} 收"
+            width = config.videoWidth
+            height = config.videoHeight
         }
-        if (width !in 1..config.videoWidth || height !in 1..config.videoHeight || fps !in 1..config.fps) {
-            throw MalformedMessageException("手机选择的尺寸或帧率超出声明范围")
+        var fps = video["fps"]?.takeIf { it > 0 }
+        if (fps == null) {
+            notes += "手机的视频格式没写有效的帧率，按声明的 ${config.fps} 收"
+            fps = config.fps
+        }
+        if (width > config.videoWidth || height > config.videoHeight || fps > config.fps) {
+            notes += "手机选的 ${width}x$height@$fps 超出声明的 ${config.videoWidth}x${config.videoHeight}@${config.fps}，照手机选的收"
         }
         selection = VideoSelection(width, height, fps)
         inputEvents = events
         inputVendors = vendors
+        inputOff = off
         sourceDeviceType = source
+        return notes
+    }
+
+    /** SETUP 触发时手机还没选过视频参数：按声明的尺寸和帧率收，返回要写的说明。 */
+    fun selectDeclared(): String {
+        selection = VideoSelection(config.videoWidth, config.videoHeight, config.fps)
+        return "SETUP 前手机没有选视频参数，按声明的 ${config.videoWidth}x${config.videoHeight}@${config.fps} 收"
     }
 
     /**
-     * SETUP 应答到达后生成媒体参数；声明了输入就必须有完整的输入选择和有效回控端口。
-     * 只有可选的按键事件（媒体键）时例外：手机没给回控端口，只是这次不能发键。
+     * SETUP 应答到达后生成媒体参数。输入能力用不了（手机没选、选得不全、没给回控端口）时不断开，
+     * 这次不发触控和按键，把原因写进 [notes]。只有可选的按键事件（媒体键）时手机没给回控端口不写说明。
      */
-    fun mediaSetup(videoPort: Int, remoteControlPort: Int): MediaSetup {
+    fun mediaSetup(videoPort: Int, remoteControlPort: Int, notes: MutableList<String>): MediaSetup {
         val chosen = selection ?: throw MalformedMessageException("SETUP 前缺少视频参数选择")
         var events = inputEvents
-        if (advertisedEvents.isNotEmpty()) {
+        var vendors = inputVendors
+        if (advertisedEvents.isNotEmpty() && !inputOff) {
             val picked = inputEvents.toSet()
             val mandatory = requiredEvents.isNotEmpty() || advertisedVendors.isNotEmpty()
-            if (!picked.containsAll(requiredEvents) || !advertisedEvents.containsAll(picked) ||
-                inputVendors.toSet() != advertisedVendors.toSet() || (mandatory && remoteControlPort !in 1..65535)
-            ) {
-                throw MalformedMessageException("输入协商不完整或手机没有给回控端口")
+            if (!picked.containsAll(requiredEvents) || !advertisedEvents.containsAll(picked)) {
+                notes += "手机选的输入事件不完整，这次不能触控"
+                events = emptyList()
+                vendors = emptyList()
+            } else if (remoteControlPort !in 1..65535) {
+                if (mandatory) notes += "手机没有给回控端口，这次不能触控"
+                events = emptyList()
+                vendors = emptyList()
             }
-            if (remoteControlPort !in 1..65535) events = emptyList()
         }
-        return MediaSetup(chosen, videoPort, remoteControlPort, events, inputVendors, sourceDeviceType)
+        if (inputOff) {
+            events = emptyList()
+            vendors = emptyList()
+        }
+        return MediaSetup(chosen, videoPort, remoteControlPort, events, vendors, sourceDeviceType)
     }
 
     /**
-     * 解析手机的输入选择，必须与声明完全一致（顺序可以不同），返回手机给出的顺序。
-     * 可选的按键事件（媒体键）例外：可以不选；只选了其中一个时当作都没选。
+     * 解析手机的输入选择。鸿蒙 3.0 的手机会把自己支持的事件全列上（含车机没声明的鼠标事件，触摸、按键各列两遍，
+     * 2026-11 实机），所以没声明的事件和重复项丢掉、只用声明过的，并写一条说明；不认识的子字段忽略。
+     * 必须的事件没选全、类别不是 GENERIC 时抛异常，由 [select] 改成「这次不能触控」。
      */
-    private fun inputSelection(value: String): Pair<List<String>, List<String>> {
+    private fun inputSelection(value: String, notes: MutableList<String>): Pair<List<String>, List<String>> {
         val parts = value.split(";").toMutableList()
         if (parts.last().isEmpty()) parts.removeAt(parts.size - 1)
         val fields = HashMap<String, String>()
+        val ignored = ArrayList<String>(0)
         for (part in parts) {
             val eq = part.indexOf('=')
-            val name = if (eq >= 0) part.substring(0, eq) else part
+            val name = ParameterText.trimSpaceTab(if (eq >= 0) part.substring(0, eq) else part)
             if (eq < 0 || name !in INPUT_SELECTION_FIELDS || name in fields) {
-                throw MalformedMessageException("输入选择含未知、重复或格式错误的字段")
+                ignored += part
+                continue
             }
             fields[name] = part.substring(eq + 1)
         }
+        if (ignored.isNotEmpty()) notes += "手机的输入选择里有不认识或重复的项（${ignored.joinToString("；") { shown(it) }}），忽略"
         val generic = fields["generic_cap_list"]
-        if (fields["input_category_list"].orEmpty().trim() != "GENERIC" || generic == null) {
-            throw MalformedMessageException("输入选择必须是已声明的 GENERIC 类别")
+        if (fields["input_category_list"]?.let { ParameterText.trimSpaceTab(it) } != "GENERIC" || generic == null) {
+            throw MalformedMessageException("不是已声明的 GENERIC 类别")
         }
-        var events = splitList(generic)
-        // 手机回传的列表常常和声明的写法不完全一致（实测鸿蒙 4.2），有两类差异不该让协商失败：
-        // 1. 整份列表重复一遍（`a, b, c, a, b, c`）：这不是"重复选择"，按出现顺序去重即可；
-        // 2. 额外带上鼠标事件 mouse_down / mouse_up / mouse_move：本端从没声明鼠标，投屏层也不处理鼠标，
-        //    这是手机多说的能力，忽略它不影响本端实际处理的事件集合。
-        // 除此之外的未知事件仍然拒绝：那说明手机选了我们没声明的东西，不能装作没看见。
-        // 这两处是与参考实现的有意偏离（参考实现遇到多出来的项直接拒绝），理由和 his_audio_codecs 一样：
-        // 拒绝只会让这类手机连不上。
-        events = events.distinct()
-        val unknown = events.filter { it !in advertisedEvents && it !in IGNORABLE_EVENTS }
-        if (unknown.isNotEmpty()) {
-            throw MalformedMessageException(
-                "输入选择含未声明的事件（手机给了：${eventExcerpt(generic)}）",
-            )
+        val listed = if (generic.isEmpty()) emptyList() else generic.split(", ")
+        val declared = listed.filter { it in advertisedEvents }
+        var events = declared.distinct()
+        val extra = listed.filter { it !in advertisedEvents }.distinct()
+        if (extra.isNotEmpty() || events.size != declared.size) {
+            val shownExtra = extra.take(EXTRA_EVENTS_SHOWN).joinToString("、") { it.filter { c -> c in ' '..'~' }.take(EVENT_NAME_MAX) }
+            notes += "手机的输入选择里有车机没声明的事件（${if (extra.isEmpty()) "无" else shownExtra}）或重复项，只用声明过的：" +
+                events.joinToString("、")
         }
-        events = events.filter { it in advertisedEvents }
-        if (!events.containsAll(requiredEvents)) {
-            throw MalformedMessageException(
-                "输入选择缺少已声明的事件（手机给了：${eventExcerpt(generic)}）",
-            )
-        }
-        // 可选的按键事件只选了一半：当作没选，免得按下发得出去、抬不起来。
+        if (!events.containsAll(requiredEvents)) throw MalformedMessageException("缺少已声明的事件")
+        // 可选的按键事件只选了一半：当作没选，免得按下发得出去、抬起发不出去。
         if (!events.containsAll(optionalEvents)) events = events.filter { it !in optionalEvents }
         var vendors = emptyList<String>()
         fields["vendor_cap_list"]?.let { list ->
-            // 空串在这里按「给了一个空能力」处理（会被判为未声明），与参考实现一致：
-            // 只有完全不写这个字段才算「没有 vendor 能力」。
-            vendors = if (list.isEmpty()) listOf("") else splitList(list).distinct()
-            if (vendors.any { it !in advertisedVendors }) {
-                throw MalformedMessageException("vendor 输入选择含未声明的能力（手机给了：${eventExcerpt(list)}）")
-            }
+            val all = list.split(", ")
+            vendors = all.filter { it in advertisedVendors }.distinct()
+            if (vendors.size != all.size) notes += "手机的 vendor 输入选择有重复或没声明的项（${shown(list)}），只用声明过的"
         }
-        if (vendors.toSet() != advertisedVendors.toSet()) throw MalformedMessageException("vendor 输入选择不完整")
+        if (vendors.toSet() != advertisedVendors.toSet()) {
+            notes += "手机没有选回成文输入，这次不能直接发文字"
+        }
         return events to vendors
     }
 
     /**
-     * 拆能力列表：分隔符是逗号，逗号后的空格可有可无（各家手机写法不同，鸿蒙 4.2 就不带空格），
-     * 两端空白一并去掉，空项忽略。只接受逗号，避免把事件名里的字符误当分隔符。
+     * 分号分隔的 `名字 整数` 列表，宽松读：[known] 以外的名字、值不是非负整数的、重复的都跳过（写一条说明），
+     * 只留读得出的。
      */
-    private fun splitList(value: String): List<String> {
-        if (value.isBlank()) return emptyList()
-        return value.split(',').map { it.trim() }.filter { it.isNotEmpty() }
-    }
-
-    /** 出错提示里附上手机给的字段原文（[eventExcerpt] 的别名，语义更通用）。 */
-    private fun valueExcerpt(value: String): String = eventExcerpt(value)
-
-    /** 出错提示里附上手机给的列表原文：只有事件名和逗号，不含任何密钥。 */
-    private fun eventExcerpt(value: String): String {
-        val out = StringBuilder()
-        for (c in value) {
-            if (out.length >= 120) {
-                out.append("...")
-                break
+    private fun lenientIntegers(value: String, known: Set<String>, notes: MutableList<String>, what: String): Map<String, Int> {
+        val result = LinkedHashMap<String, Int>()
+        val skipped = ArrayList<String>(0)
+        val parts = value.split(";")
+        for ((i, part) in parts.withIndex()) {
+            val tokens = ParameterText.trimSpaceTab(part).split(' ', '\t').filter { it.isNotEmpty() }
+            if (tokens.isEmpty()) {
+                // 末尾的分号后面本来就是空的；中间的空项是格式不规范，记一下。
+                if (i != parts.size - 1) skipped += "（空项）"
+                continue
             }
-            out.append(if (c in ' '..'~') c else '.')
+            val number = if (tokens.size == 2) decimalOrNull(tokens[1]) else null
+            if (tokens[0] !in known || number == null || tokens[0] in result) {
+                if (tokens[0] !in ECHO_ONLY_VIDEO_FIELDS) skipped += part
+                continue
+            }
+            result[tokens[0]] = number
         }
-        return if (out.isEmpty()) "空" else out.toString()
+        if (skipped.isNotEmpty()) notes += "手机的${what}里有读不了或不用的项（${skipped.joinToString("；") { shown(it) }}），忽略"
+        return result
     }
+
+    private fun decimalOrNull(text: String): Int? {
+        if (text.isEmpty() || text.length > 10 || !text.all { it in '0'..'9' }) return null
+        return text.toLong().takeIf { it <= Int.MAX_VALUE }?.toInt()
+    }
+
+    /** 写进说明的手机原文：只留可见 ASCII，最多 [AUDIO_NOTE_MAX] 个字符。 */
+    private fun shown(text: String): String = text.filter { it in ' '..'~' }.take(AUDIO_NOTE_MAX)
 
     private fun isAcceptedVersion(text: String): Boolean {
         val dot = text.indexOf('.')
@@ -269,14 +316,15 @@ internal class Capabilities(private val config: HiSightConfig) {
     }
 
     companion object {
+        /** 说明里最多列这么多个没声明的事件、每个最多这么多字符。 */
+        private const val EXTRA_EVENTS_SHOWN = 8
+        private const val EVENT_NAME_MAX = 40
+
+        /** 说明里最多写手机选的音频值的这么多字符。 */
+        private const val AUDIO_NOTE_MAX = 120
+
         val TOUCH_EVENTS = listOf("left_point_down", "left_point_up", "left_move")
         val KEY_EVENTS = listOf("left_key_down", "left_key_up")
-
-        /**
-         * 手机可能多带、但本端明确不处理也不需要处理的事件：鼠标。投屏层不声明鼠标能力，
-         * 鸿蒙 4.2 实测会把它一并回传，忽略即可（见 [inputSelection]）。
-         */
-        private val IGNORABLE_EVENTS = setOf("mouse_down", "mouse_up", "mouse_move")
         const val TEXT_VENDOR = "input_content"
         private val VIDEO_FIELDS = setOf(
             "codecs", "fps", "gop", "bitrate", "vbr-min", "vbr-max", "dpi",

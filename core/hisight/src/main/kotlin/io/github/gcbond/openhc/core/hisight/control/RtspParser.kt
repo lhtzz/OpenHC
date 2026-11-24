@@ -66,7 +66,50 @@ internal object RtspParser {
         object MoreHeaders : AtBlank()
     }
 
-    fun parse(payload: ByteArray): RtspMessage {
+    fun parse(payload: ByteArray): RtspMessage =
+        try {
+            parseStrict(payload)
+        } catch (e: MalformedMessageException) {
+            // 照常拆不开时，再看是不是少了头部结束空行的请求；也不是就照原来的错报。
+            val fallback = try {
+                requestWithoutBlankLine(payload)
+            } catch (ignored: MalformedMessageException) {
+                null
+            }
+            fallback ?: throw e
+        }
+
+    /**
+     * 请求少了头部结束的空行（手机切换应用时会发这种）：头部之后直接接正文。从前往后找一处行首，
+     * 之前的都是合规、不重复的头，其中 Content-Length 正好等于之后的字节数，就从这里分开。整条里有空行的不走这里。
+     */
+    private fun requestWithoutBlankLine(p: ByteArray): RtspMessage? {
+        for (i in 0..p.size - 4) if (isCrlf(p, i) && isCrlf(p, i + 2)) return null
+        val lines = splitLines(p)
+        val firstLine = lines.items.firstOrNull() ?: return null
+        if (!isAscii(p, firstLine.start, firstLine.end)) return null
+        val first = ascii(p, firstLine.start, firstLine.end)
+        requestMethod(first)
+        val values = LinkedHashMap<String, String>()
+        for (k in 1..lines.items.size) {
+            val bodyStart = if (k < lines.items.size) lines.items[k].start else lines.tailStart
+            val declared = values["content-length"]?.let { decimal(it, 5).toInt() }
+            if (declared != null && declared > 0 && p.size - bodyStart == declared && "cseq" in values) {
+                return RtspMessage(first, values, p.copyOfRange(bodyStart, p.size), cseqOf(values))
+            }
+            if (k == lines.items.size) break
+            val line = lines.items[k]
+            if (!isAscii(p, line.start, line.end) || hasControlCharacter(p, line.start, line.end)) return null
+            val text = ascii(p, line.start, line.end)
+            val colon = text.indexOf(':')
+            val name = if (colon > 0) text.substring(0, colon).lowercase() else return null
+            if (!isHeaderName(name) || name in values) return null
+            values[name] = trimSpaceTab(text.substring(colon + 1))
+        }
+        return null
+    }
+
+    private fun parseStrict(payload: ByteArray): RtspMessage {
         val lines = splitLines(payload)
         val firstLine = lines.items.firstOrNull() ?: throw MalformedMessageException("控制消息缺少首行结束符")
         if (!isAscii(payload, firstLine.start, firstLine.end)) throw MalformedMessageException("控制消息首行含非 ASCII 字节")
@@ -91,56 +134,25 @@ internal object RtspParser {
         if (blankLines > 0) throw lengthMismatch(payload.size - lastBlankEnd(lines))
         return keepAliveWithoutBlankLine(payload, lines, first, headers)
             ?: setupReplyWithoutBlankLine(payload, lines, first, headers)
-            ?: bodyWithoutBlankLine(payload, lines, first, headers)
-            ?: throw MalformedMessageException("控制消息缺少头部结束空行（原文：${excerpt(payload)}）")
+            ?: throw MalformedMessageException("控制消息缺少头部结束空行：${shown(payload)}")
     }
 
-    /**
-     * 头部区没有空行、但带 Content-Length 且其后字节数正好等于声明长度：按「空行被省掉了」接受。
-     *
-     * 实测手机在切换应用时会发这种报文（头部齐全、正文完整，只是少了分隔空行）。判断条件很窄：
-     * 必须有 Content-Length、必须是请求（方法合法）、且声明长度与剩余字节**精确相等**，
-     * 所以不会把「正文被当成头」或截断的报文误认成合法消息。
-     */
-    private fun bodyWithoutBlankLine(p: ByteArray, lines: Lines, first: String, headers: HeaderTable): RtspMessage? {
-        val values = headers.values
-        val declaredText = values["content-length"] ?: return null
-        val declared = try {
-            decimal(declaredText, 5).toInt()
-        } catch (e: MalformedMessageException) {
-            return null
-        }
-        if (declared <= 0) return null
-        val method = try {
-            requestMethod(first)
-        } catch (e: MalformedMessageException) {
-            return null
-        }
-        if (method != "SET_PARAMETER" && method != "GET_PARAMETER" && method != "SETUP" &&
-            method != "TEARDOWN" && method != "PLAY" && method != "ANNOUNCE"
-        ) {
-            return null
-        }
-        val bodyStart = lines.tailStart
-        if (p.size - bodyStart != declared) return null
-        for (i in bodyStart until p.size) {
-            if (p[i] < 0) return null
-        }
-        return RtspMessage(first, values, p.copyOfRange(bodyStart, p.size), cseqOf(values))
-    }
-
-    /** 出错提示里附上原文：只留可打印 ASCII，控制字符写成点，超长截断。 */
-    private fun excerpt(payload: ByteArray): String {
-        val out = StringBuilder()
-        for (b in payload) {
-            if (out.length >= 120) {
-                out.append("...")
-                break
+    /** 报错里带上消息开头（不可打印字节换成点、长串隐去），用来对照手机发了什么。 */
+    private fun shown(p: ByteArray): String {
+        val text = buildString {
+            for (i in 0 until minOf(p.size, SHOWN_BYTES)) {
+                val c = p[i].toInt() and 0xFF
+                append(
+                    when (c) {
+                        0x0D -> "\\r"
+                        0x0A -> "\\n"
+                        in 0x20..0x7E -> c.toChar().toString()
+                        else -> "."
+                    },
+                )
             }
-            val v = b.toInt() and 0xFF
-            out.append(if (v in 0x20..0x7E) v.toChar() else '.')
-        }
-        return if (out.isEmpty()) "空" else out.toString()
+        }.replace(LONG_TOKEN) { "<隐去 ${it.value.length} 字符>" }
+        return if (p.size > SHOWN_BYTES) "$text…（共 ${p.size} 字节）" else text
     }
 
     private fun splitLines(p: ByteArray): Lines {
@@ -205,20 +217,13 @@ internal object RtspParser {
             first.startsWith("SET_PARAMETER ") && requestMethod(first) == "SET_PARAMETER"
 
     /**
-     * 没有结尾空行的 GET_PARAMETER 保活。
-     *
-     * 实测两种写法都要接住：
-     * - `Date:` 为空、只有 CSeq（参考实现里的那一种）；
-     * - `Date: 2026-11-22 20:48:22 PM Sun` 带真实时间（鸿蒙 4.2 在投屏中暂停播放时发的）。
-     *
-     * 共同点：**正好** Date 和 CSeq 两个头、目标是以 `rtsp://` 开头的 URI、最后一个头之后
-     * 没有多余字节（既没有空行，也没有正文）。判断范围仍收得很窄：只带 CSeq、没有 Date 的报文不算保活，
-     * 带正文或多余头的也不算，不会把它们误认成合法消息。
+     * 空 GET_PARAMETER 保活：只有 Date 和 CSeq，最后一行之后没有空行也没有多余字节。Date 可以是空的，也可以带时间
+     * （鸿蒙 3.0 的手机投屏约 30 秒后发这种，2026-11 实机）。
      */
     private fun keepAliveWithoutBlankLine(p: ByteArray, lines: Lines, first: String, headers: HeaderTable): RtspMessage? {
         val values = headers.values
         val matches = lines.tailStart == p.size && first.startsWith("GET_PARAMETER rtsp://") &&
-            values.keys == setOf("date", "cseq") &&
+            values.size == 2 && "date" in values && "cseq" in values &&
             printableOutsideCrlf(p) && requestMethod(first) == "GET_PARAMETER"
         return if (matches) RtspMessage(first, values, EMPTY, cseqOf(values)) else null
     }
@@ -342,6 +347,9 @@ internal object RtspParser {
     private const val NPT_NOW = "npt=now-"
     private const val CR: Byte = 0x0D
     private const val LF: Byte = 0x0A
+
+    private const val SHOWN_BYTES = 160
+    private val LONG_TOKEN = Regex("[0-9A-Za-z+/]{20,}")
 
     private fun isCrlf(p: ByteArray, at: Int) = at >= 0 && at + 1 < p.size && p[at] == CR && p[at + 1] == LF
 

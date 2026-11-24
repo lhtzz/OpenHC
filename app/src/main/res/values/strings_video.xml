@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 设置页：画面调试开关 -->
+    <string name="settings_ui_scale">界面大小</string>
+    <string name="settings_ui_scale_hint">按百分比缩小声明给手机的 DPI：100% 是车机原始大小，数字越小，同一屏放得下的内容越多、字越小。画面尺寸和码率不变，下次连接生效。</string>
+    <string name="settings_ui_scale_value">%1$d%%</string>
     <string name="settings_full_screen">全屏显示</string>
     <string name="settings_full_screen_hint">开：投屏时藏起状态栏和底部导航栏，画面铺满整屏。关：保留底部导航栏，画面让出它的位置——车机装了常驻悬浮底栏、全屏时画面底部被挡住时关掉。下次连接生效。</string>
     <string name="settings_video_frame_pacing">按屏幕刷新节拍上屏（调试，默认开）</string>

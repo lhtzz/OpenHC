@@ -200,6 +200,18 @@ internal class SettingsView(context: Context) : ScrollView(context) {
             rebuild()
         }
 
+        // 界面大小：只缩小（100 / 85 / 75 / 65%）。
+        val scaleValues = DisplayPlan.UI_SCALE_CHOICES
+        rows += choiceRow(
+            title = context.getString(R.string.settings_ui_scale),
+            options = scaleValues.map { context.getString(R.string.settings_ui_scale_value, it) },
+            selected = scaleValues.indexOf(settings.uiScalePercent).coerceAtLeast(0),
+            description = context.getString(R.string.settings_ui_scale_hint),
+        ) { index ->
+            settings.uiScalePercent = scaleValues[index]
+            rebuild()
+        }
+
         // 全屏显示。
         rows += switchRow(
             context = context,
@@ -326,7 +338,90 @@ internal class SettingsView(context: Context) : ScrollView(context) {
             rebuild()
         }
 
+        // 用「车机自带热点」。
+        rows += carHotspotRow(wirelessPrefs, rebuild)
+
         return settingsGroup(context, context.getString(R.string.settings_group_connection), rows)
+    }
+
+    /**
+     * 车机自带热点：开关 + 热点名 / 密码 / 频段。开着时 OpenHC 不再自己开热点，用车主在车机设置里开好的那个。
+     * 安卓 4.x～7.x 上反射调 setWifiApEnabled 成功率低，这条路最稳。
+     */
+    private fun carHotspotRow(wirelessPrefs: WirelessPreferences, rebuild: () -> Unit): View {
+        val enabled = wirelessPrefs.carHotspot
+        val inner = context.column()
+
+        val toggle = PillSwitchView(context).apply {
+            isChecked = enabled
+            setOnCheckedChange { value ->
+                wirelessPrefs.carHotspot = value
+                rebuild()
+            }
+        }
+        inner.addView(
+            settingsRow(
+                context,
+                context.getString(R.string.settings_car_hotspot),
+                context.getString(R.string.settings_car_hotspot_hint),
+                toggle,
+            ),
+        )
+
+        if (enabled) {
+            val nameInput = EditText(context).apply {
+                hint = context.getString(R.string.settings_car_hotspot_name)
+                setText(wirelessPrefs.carHotspotName)
+                inputType = InputType.TYPE_CLASS_TEXT
+                setSingleLine(true)
+                setTextColor(Palette.Text)
+                setHintTextColor(Palette.Muted)
+            }
+            val passwordInput = EditText(context).apply {
+                hint = context.getString(R.string.settings_car_hotspot_password)
+                setText(wirelessPrefs.carHotspotPassword)
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                setSingleLine(true)
+                setTextColor(Palette.Text)
+                setHintTextColor(Palette.Muted)
+            }
+            inner.addView(nameInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = context.dp(8f)
+            })
+            inner.addView(passwordInput, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = context.dp(6f)
+            })
+
+            val saveRow = context.row()
+            saveRow.addView(actionButton(context, context.getString(R.string.settings_car_hotspot_save)) {
+                val name = nameInput.text.toString().trim()
+                val password = passwordInput.text.toString()
+                if (name.isEmpty() || password.isEmpty()) {
+                    Toast.makeText(context, R.string.settings_car_hotspot_save, Toast.LENGTH_SHORT).show()
+                } else {
+                    wirelessPrefs.carHotspotName = name
+                    wirelessPrefs.carHotspotPassword = password
+                    Toast.makeText(context, R.string.settings_car_hotspot_saved, Toast.LENGTH_SHORT).show()
+                    rebuild()
+                }
+            })
+            inner.addView(saveRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = context.dp(8f)
+            })
+
+            inner.addView(
+                switchRow(
+                    context,
+                    context.getString(R.string.settings_car_hotspot_5g),
+                    null,
+                    wirelessPrefs.carHotspotFiveGhz,
+                ) { value -> wirelessPrefs.carHotspotFiveGhz = value },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = context.dp(6f)
+                },
+            )
+        }
+        return inner.apply { setPadding(0, context.dp(8f), 0, context.dp(8f)) }
     }
 
     /** 车机蓝牙地址：显示当前值 + 来源；点开展开手动填写、保存、清除、自动读取。 */

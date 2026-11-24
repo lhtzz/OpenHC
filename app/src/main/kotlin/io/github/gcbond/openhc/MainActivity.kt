@@ -272,12 +272,19 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // 手机点「车机」图标暂停投屏时要回车机桌面，只在界面在前台时处理（见 CarHome）。
+        io.github.gcbond.openhc.connection.CarHome.attach(this)
         // 记下底部导航栏的实际高度（不管此刻显不显示），「全屏显示」关时按它让出画面、算声明尺寸。
         root.post {
             val bar = navigationBarHeight()
             if (bar > 0) io.github.gcbond.openhc.connection.DisplayArea.measuredNavigationBarHeight = bar
         }
         wireless.onAppForeground()
+    }
+
+    override fun onPause() {
+        io.github.gcbond.openhc.connection.CarHome.detach(this)
+        super.onPause()
     }
 
     private fun navigationBarHeight(): Int {

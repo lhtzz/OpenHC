@@ -43,11 +43,14 @@ android {
         applicationId = "io.github.gcbond.openhc"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        // versionCode = 主版本 × 10000 + 次版本 × 100 + 补丁号。
-        // 这个分支是「上游 0.2.0 + 鸿蒙 4.2 音频修复 + 低版本车机适配」的衍生版：
-        // 加 50 跟上游 0.2.0（200）区分开，装到车机上时一眼能看出跑的是哪个包。
-        versionCode = 286
-        versionName = "harmony4.2-NEXT-0.2.0-android4"
+        // 这个分支是上游 0.2.7 的全套协议/音频能力 + 安卓 4.1～7.x 车机适配（minSdk 16）。
+        // 主线（main）是 0.2.7-android6（minSdk 23，versionCode 307）。
+        //
+        // versionCode 用独立的 4xxxx 段：安卓 4 分支和主线装在同一台车机上时（同一个 applicationId），
+        // 号段分开才能互相覆盖安装、不用先卸载。4 开头 = 安卓 4 分支，后面跟「主版本 × 100 + 次版本 × 10 + 补丁」，
+        // 所以 0.2.7 是 40207。主线继续在 3xx 段递增，两条线互不干扰。
+        versionCode = 40207
+        versionName = "0.2.7-android4"
         // 方法数超过 64K，安卓 4.x 要用 MultiDex 分包（5.0 起系统自带）。
         multiDexEnabled = true
     }

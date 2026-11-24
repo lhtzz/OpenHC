@@ -140,10 +140,12 @@ class HiSightReceiverTest {
         val phone = Phone()
         val config = HiSightConfig(640, 480, 640, 480, 30, 160, touchInput = true)
         val s = session(config)
-        assertFailsWith<MalformedMessageException> {
-            negotiate(s, phone, "RTP/AVP/TCP;unicast;server_port=5000",
-                uibc = "input_category_list=GENERIC;generic_cap_list=left_point_down, left_point_up, left_move;")
-        }
+        // 声明了触摸、手机没给回控端口：不断开，这次不能触控，写一条说明。
+        val out = negotiate(s, phone, "RTP/AVP/TCP;unicast;server_port=5000",
+            uibc = "input_category_list=GENERIC;generic_cap_list=left_point_down, left_point_up, left_move;")
+        assertTrue(out.filterIsInstance<HiSightOutput.Note>().any { "回控端口" in it.text })
+        assertEquals(false, out.filterIsInstance<HiSightOutput.StreamNegotiated>().single().touchInput)
+        assertTrue(out.none { it is HiSightOutput.Connect && it.channel == HiSightChannel.REMOTE_CONTROL })
         assertFailsWith<IllegalStateException> { session().sendInput(HiSightInput.Text("A")) }
     }
 
@@ -207,6 +209,120 @@ class HiSightReceiverTest {
         assertFailsWith<MalformedMessageException> { s.feedVideo(bad, 0, bad.size) }
         assertFailsWith<MalformedMessageException> { s.onVideoClosed() }
         assertEquals(listOf("TEARDOWN  RTSP/1.0#4"), phone.read(s.shutdown()))
+    }
+
+    /** 送一条正文为 [body] 的 ANNOUNCE（在手机应答车机开头那条之后），返回这一步的输出。 */
+    private fun announce(s: HiSightReceiver, phone: Phone, body: String): List<HiSightOutput> {
+        s.start()
+        return s.feed(phone.frame("RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n") +
+            phone.frame("ANNOUNCE * RTSP/1.0\r\nCSeq: 8\r\nContent-Type: text/parameters\r\nContent-Length: ${body.length}\r\n\r\n$body"))
+    }
+
+    /** 鸿蒙 4.x 的手机按「正好一行」的旧规则被拒；这些写法都接受，并交出诊断说明，之后照常切到加密。 */
+    @Test
+    fun announceVariantsAreAcceptedWithANote() {
+        val variants = listOf(
+            "encrypt_description: encrypt_list=aes128ctr;version=1",
+            "encrypt_description: encrypt_list=aes128ctr;version=1\n",
+            "encrypt_description: encrypt_list=aes128ctr;version=1\r\n\r\n",
+            "encrypt_description: encrypt_list=aes128ctr;version=1\r\nencrypt_option: 2\r\n",
+            "encrypt_description: encrypt_list=aes128ctr,sm4ctr;version=1\r\n",
+            "encrypt_description: encrypt_list=AES128CTR;version=1;mode=2\r\n",
+            "encrypt_description: encrypt_list=aes128ctr\r\n",
+            "\r\nencrypt_description:encrypt_list = aes128ctr ; version = 1\r\n",
+        )
+        for (body in variants) {
+            val phone = Phone()
+            val s = session()
+            val out = announce(s, phone, body)
+            assertEquals(listOf("RTSP/1.0 200 OK#8"), phone.read(out), body)
+            val note = out.filterIsInstance<HiSightOutput.Note>().single()
+            assertTrue("encrypt_description" in note.text && "\r" !in note.text && "\n" !in note.text, note.text)
+            phone.encrypted = true
+            assertEquals(listOf("RTSP/1.0 200 OK#9", "OPTIONS * RTSP/1.0#2"), phone.read(s.feed(phone.frame("OPTIONS * RTSP/1.0\r\nCSeq: 9\r\n\r\n"))), body)
+        }
+    }
+
+    /** 不认识的写法里万一带着密钥一类的长串，诊断说明里只写长度。 */
+    @Test
+    fun longTokensInAnAnnounceAreNotShown() {
+        val token = "0123456789abcdef0123456789ABCDEF"
+        val phone = Phone()
+        val out = announce(session(), phone, "encrypt_description: encrypt_list=aes128ctr;version=1;key=$token\r\nencrypt_option: 2\r\n")
+        val note = out.filterIsInstance<HiSightOutput.Note>().single()
+        assertTrue(token !in note.text && "<隐去 32 字符>" in note.text && "encrypt_list=aes128ctr" in note.text, note.text)
+    }
+
+    @Test
+    fun standardAnnounceHasNoNote() {
+        val out = announce(session(), Phone(), "encrypt_description: encrypt_list=aes128ctr;version=1\r\n")
+        assertTrue(out.none { it is HiSightOutput.Note })
+    }
+
+    /** 加密选择之后不发 OPTIONS、直接查能力和设能力：照常应答，只记一条说明；之后能照常走到 SETUP。 */
+    @Test
+    fun capabilityRequestsWithoutOptionsAreAnsweredWithOneNote() {
+        val phone = Phone()
+        val s = session()
+        announce(s, phone, "encrypt_description: encrypt_list=aes128ctr;version=1\r\n")
+        phone.encrypted = true
+        val query = s.feed(phone.request("GET_PARAMETER", 9, "his_version\r\nhis_video_formats\r\n"))
+        assertEquals(listOf("RTSP/1.0 200 OK#9"), phone.read(query))
+        val note = query.filterIsInstance<HiSightOutput.Note>().single()
+        assertTrue("OPTIONS" in note.text && "GET_PARAMETER" in note.text, note.text)
+
+        val m4 = s.feed(phone.request("SET_PARAMETER", 10, "his_video_formats: codecs 1;width 640;height 480;fps 30\r\n"))
+        assertEquals(listOf("RTSP/1.0 200 OK#10"), phone.read(m4))
+        val m4Notes = m4.filterIsInstance<HiSightOutput.Note>().map { it.text }
+        assertTrue(m4Notes.none { "OPTIONS" in it }, "没发 OPTIONS 的说明只记一次")
+        val selection = m4Notes.single { it.startsWith("手机的能力选择：") }
+        assertTrue("his_video_formats: codecs 1;width 640" in selection && "\\r\\n" in selection, selection)
+        assertEquals(listOf("RTSP/1.0 200 OK#11", "SETUP * RTSP/1.0#2"),
+            phone.read(s.feed(phone.request("SET_PARAMETER", 11, "his_trigger_method: SETUP\r\n"))))
+    }
+
+    /** 投屏期间手机发的事件通知、暂停等触发命令和再来的能力选择：都回 200、写说明，不断开。值都是编的。 */
+    @Test
+    fun otherTriggersAndLateSelectionsAreAnsweredWithoutEnding() {
+        val phone = Phone()
+        val s = session()
+        negotiate(s, phone, "RTP/AVP/TCP;unicast;server_port=5000;remotectl_port=5001")
+        val event = s.feed(phone.request("SET_PARAMETER", 20, "his_trigger_method: SEND_EVENT_CHANGE\r\nmodule_id: 3\r\nevent: 7\r\nparam: abc\r\n"))
+        assertEquals(listOf("RTSP/1.0 200 OK#20"), phone.read(event))
+        val notes = event.filterIsInstance<HiSightOutput.Note>().map { it.text }
+        assertTrue(notes.any { "module_id: 3" in it && "param: abc" in it }, notes.toString())
+        assertTrue(notes.any { "SEND_EVENT_CHANGE" in it }, notes.toString())
+        assertTrue(event.none { it is HiSightOutput.Ended })
+
+        val pause = s.feed(phone.request("SET_PARAMETER", 21, "his_trigger_method: PAUSE\r\n"))
+        assertEquals(listOf("RTSP/1.0 200 OK#21"), phone.read(pause))
+        assertTrue(pause.filterIsInstance<HiSightOutput.Note>().any { "PAUSE" in it.text })
+
+        val late = s.feed(phone.request("SET_PARAMETER", 22, "his_video_formats: codecs 1;width 320;height 240;fps 25\r\n"))
+        assertEquals(listOf("RTSP/1.0 200 OK#22"), phone.read(late))
+        assertTrue(late.filterIsInstance<HiSightOutput.Note>().any { "不重新协商" in it.text })
+        assertTrue(late.none { it is HiSightOutput.Ended })
+    }
+
+    @Test
+    fun capabilityRequestBeforeEncryptionIsRejected() {
+        val phone = Phone()
+        val s = session()
+        s.start()
+        s.feed(phone.frame("RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n"))
+        assertFailsWith<MalformedMessageException> { s.feed(phone.request("GET_PARAMETER", 9, "his_version\r\n")) }
+    }
+
+    @Test
+    fun unsupportedCryptoIsStillRejected() {
+        for (body in listOf(
+            "encrypt_description: encrypt_list=aes128ctr;version=2\r\n",
+            "encrypt_description: encrypt_list=sm4ctr;version=1\r\n",
+            "encrypt_description: version=1\r\n",
+            "encrypt_option: encrypt_list=aes128ctr;version=1\r\n",
+        )) {
+            assertFailsWith<MalformedMessageException>(body) { announce(session(), Phone(), body) }
+        }
     }
 
     @Test
@@ -288,163 +404,5 @@ class HiSightReceiverTest {
         assertEquals(listOf("PLAY * RTSP/1.0#4"), phone.read(s.onRemoteControlConnected()))
         assertFailsWith<IllegalArgumentException> { s.sendInput(HiSightInput.Key(HiSightInput.Key.Action.DOWN, 87, 0)) }
         s.shutdown()
-    }
-
-    // ---------------- 加密选择：各家手机系统的写法差异 ----------------
-
-    /** 用给定的正文拼一条手机的 ANNOUNCE（Content-Length 按实际字节算），分帧后交给调用方。 */
-    private fun announceFrame(body: ByteArray): ByteArray {
-        val head = "ANNOUNCE * RTSP/1.0\r\nCSeq: 8\r\nContent-Type: text/parameters\r\n" +
-            "Content-Length: ${body.size}\r\n\r\n"
-        val plain = head.toByteArray(Charsets.US_ASCII) + body
-        return ControlFraming.encode(plain)
-    }
-
-    /** 能认出加密选择就算通过：会话明文回 200。 */
-    private fun assertAnnounceAccepted(body: String) {
-        val phone = Phone()
-        val s = session()
-        s.start()
-        assertEquals(
-            listOf("RTSP/1.0 200 OK#8"),
-            phone.read(s.feed(announceFrame(body.toByteArray(Charsets.US_ASCII)))),
-            "应该接受：${body.replace("\r", "\\r").replace("\n", "\\n")}",
-        )
-    }
-
-    private fun assertAnnounceRejected(body: ByteArray): String {
-        val s = session()
-        s.start()
-        return assertFailsWith<MalformedMessageException> { s.feed(announceFrame(body)) }.message ?: ""
-    }
-
-    @Test
-    fun announceAcceptsTheKnownSingleLineForm() {
-        assertAnnounceAccepted("encrypt_description: encrypt_list=aes128ctr;version=1\r\n")
-    }
-
-    /** 鸿蒙 4.2 这类写法：行尾不是 CRLF、前后多空行、附带别的字段、列表里还有别的算法。 */
-    @Test
-    fun announceAcceptsOtherLineEndingsAndExtraFields() {
-        // 裸 LF
-        assertAnnounceAccepted("encrypt_description: encrypt_list=aes128ctr;version=1\n")
-        // 裸 CR
-        assertAnnounceAccepted("encrypt_description: encrypt_list=aes128ctr;version=1\r")
-        // 末尾多个空行
-        assertAnnounceAccepted("encrypt_description: encrypt_list=aes128ctr;version=1\r\n\r\n\r\n")
-        // 前后有别的行
-        assertAnnounceAccepted("x-vendor: 1\r\nencrypt_description: encrypt_list=aes128ctr;version=1\r\nx-tail: 2\r\n")
-        // 字段顺序不同、带空格、带别的字段
-        assertAnnounceAccepted("encrypt_description: version=1; encrypt_list=aes128ctr; extra=abc\r\n")
-        // 列表里有多个算法
-        assertAnnounceAccepted("encrypt_description: encrypt_list=aes128ctr,aes256ctr;version=1\r\n")
-        // 版本写成 1.0，算法名大写
-        assertAnnounceAccepted("encrypt_description: encrypt_list=AES128CTR;version=1.0\r\n")
-        // 没有结尾换行
-        assertAnnounceAccepted("encrypt_description: encrypt_list=aes128ctr;version=1")
-        // 省掉 encrypt_description 前缀，直接给字段
-        assertAnnounceAccepted("encrypt_list=aes128ctr;version=1\r\n")
-        // 值带引号
-        assertAnnounceAccepted("encrypt_description: encrypt_list=\"aes128ctr\";version='1'\r\n")
-    }
-
-    /** 认不出时必须说清是哪里不对，并把正文摘要带出来，方便照着现场排查。 */
-    @Test
-    fun announceRejectsUnknownFormsWithTheBodyExcerpt() {
-        val missing = assertAnnounceRejected("x-vendor: 1\r\nx-other: 2\r\n".toByteArray(Charsets.US_ASCII))
-        assertTrue("encrypt_list" in missing, missing)
-        assertTrue("x-vendor" in missing, missing)
-
-        val noAlgorithm = assertAnnounceRejected("encrypt_description: encrypt_list=aes256ctr;version=1\r\n".toByteArray(Charsets.US_ASCII))
-        assertTrue("aes128ctr" in noAlgorithm, noAlgorithm)
-
-        val noVersion = assertAnnounceRejected("encrypt_description: encrypt_list=aes128ctr\r\n".toByteArray(Charsets.US_ASCII))
-        assertTrue("version" in noVersion, noVersion)
-
-        val badVersion = assertAnnounceRejected("encrypt_description: encrypt_list=aes128ctr;version=2\r\n".toByteArray(Charsets.US_ASCII))
-        assertTrue("version 1" in badVersion, badVersion)
-    }
-
-    @Test
-    fun announceRejectsDuplicatesAndNonAscii() {
-        val body = "encrypt_description: encrypt_list=aes128ctr;version=1\r\n".toByteArray(Charsets.US_ASCII)
-        val s = session()
-        s.start()
-        s.feed(announceFrame(body))
-        assertFailsWith<MalformedMessageException> { s.feed(announceFrame(body)) }
-
-        val nonAscii = session()
-        nonAscii.start()
-        assertFailsWith<MalformedMessageException> {
-            nonAscii.feed(announceFrame(body + byteArrayOf(0xFF.toByte())))
-        }
-    }
-
-    /** 鸿蒙 4.2 不先发 OPTIONS 就查能力：加密协商完之后直接回能力，不要求先过 OPTIONS。 */
-    @Test
-    fun capabilityQueryWorksWithoutPriorOptions() {
-        val phone = Phone()
-        val s = session()
-        s.start()
-        s.feed(announceFrame("encrypt_description: encrypt_list=aes128ctr;version=1\r\n".toByteArray(Charsets.US_ASCII)))
-        phone.encrypted = true
-        val body = "his_version\r\nhis_video_formats\r\n"
-        val reply = phone.read(s.feed(phone.request("GET_PARAMETER", 9, body)))
-        assertEquals(listOf("RTSP/1.0 200 OK#9"), reply)
-    }
-
-    /** 加密协商之前的能力请求仍然拒绝，提示里要带上「已收到哪些请求」，便于不抓包也能定位。 */
-    @Test
-    fun capabilityQueryBeforeAnnounceIsRejectedWithTrace() {
-        val phone = Phone()
-        val s = session()
-        s.start()
-        val message = assertFailsWith<MalformedMessageException> {
-            s.feed(phone.request("GET_PARAMETER", 9, "his_version\r\n"))
-        }.message ?: ""
-        assertTrue("加密协商" in message, message)
-        assertTrue("GET_PARAMETER" in message, message)
-    }
-
-    /**
-     * 带 `module_id` 的 SET_PARAMETER 是手机发给某个子模块的（实测鸿蒙 4.2 的「智慧聆听」用 1001），
-     * 不是能力协商：回 200 让它继续，但不当作能力选择、也不能因此断开投屏。
-     */
-    @Test
-    fun moduleRoutedSetParameterIsAnsweredButNotTreatedAsCapabilitySelection() {
-        val phone = Phone()
-        val s = session(HiSightConfig(640, 480, 640, 480, 30, 160, touchInput = true))
-        s.start()
-        s.feed(announceFrame("encrypt_description: encrypt_list=aes128ctr;version=1\r\n".toByteArray(Charsets.US_ASCII)))
-        phone.encrypted = true
-
-        // 先正常完成一次能力选择，确认后面的 module 请求不会污染它。
-        val uibc = "input_category_list=GENERIC;generic_cap_list=left_point_down, left_point_up, left_move;"
-        s.feed(phone.request("SET_PARAMETER", 11, "his_video_formats: codecs 1;width 640;height 480;fps 30\r\nhis_uibc_capability: $uibc\r\n"))
-
-        // 智慧聆听的子模块请求：只回 200，不报错。
-        val routed = phone.read(
-            s.feed(phone.request("SET_PARAMETER", 12, "module_id: 1001\r\nhis_continuous_dialog: 1\r\n")),
-        )
-        assertEquals(listOf("RTSP/1.0 200 OK#12"), routed)
-
-        // 能力选择仍然有效：SETUP 触发照常走通。
-        val setup = phone.read(s.feed(phone.request("SET_PARAMETER", 13, "his_trigger_method: SETUP\r\n")))
-        assertEquals(listOf("RTSP/1.0 200 OK#13", "SETUP * RTSP/1.0#2"), setup)
-        s.shutdown()
-    }
-
-    /** 没有 `module_id` 的未知字段仍然拒绝：那才是真拆歪了。 */
-    @Test
-    fun unknownFieldWithoutModuleIdIsStillRejected() {
-        val phone = Phone()
-        val s = session()
-        s.start()
-        s.feed(announceFrame("encrypt_description: encrypt_list=aes128ctr;version=1\r\n".toByteArray(Charsets.US_ASCII)))
-        phone.encrypted = true
-        val message = assertFailsWith<MalformedMessageException> {
-            s.feed(phone.request("SET_PARAMETER", 11, "totally_unknown_field: 1\r\n"))
-        }.message ?: ""
-        assertTrue("名字未知" in message, message)
     }
 }

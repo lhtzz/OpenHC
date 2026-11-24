@@ -1,7 +1,8 @@
 package io.github.gcbond.openhc.audio
 
 import android.content.Context
-
+import android.os.SystemClock
+import io.github.gcbond.openhc.core.dmsdp.audio.AudioBus
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioCodec
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioEndReason
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioEvent
@@ -40,6 +41,8 @@ import java.util.EnumMap
 internal class AudioOutput(
     context: Context,
     private val attemptId: Int,
+    /** 无线连接：音乐和导航多垫 [WIRELESS_CUSHION_MILLIS]（[AudioTuning.withCushion]），电话、提示与语音、铃声不垫。 */
+    private val wireless: Boolean = false,
     /** 我们是不是在替手机拿着媒体焦点，变化时在焦点线程上回调（媒体按钮会话跟着它建和关）。 */
     private val mediaFocusChanged: (Boolean) -> Unit = {},
     /** 把车机的焦点变化告诉手机（实现方投到协议线程上发）。 */
@@ -50,88 +53,6 @@ internal class AudioOutput(
     private val prefs = AudioPreferences(app)
     private val tuning: AudioTuning = prefs.playbackTuning()
 
-    /**
-     * 鸿蒙 4.2 控制连接私有帧（连续流）用的播放参数：比默认多攒一些。
-     *
-     * 实测这台手机每 3 秒拆一次数据会话、几十毫秒后再请求新的（见 [SpeakerSession.feedPrivateFrame]），
-     * 换号那一瞬间声音会停发约 50～70ms。默认参数只有 80ms 起播门槛、40ms 音轨缓冲，
-     * 稳态队列又常年在 20～48ms，盖不住这个空档：每 3 秒「放空 → 暂停 → 重新攒 85ms → 再出声」，
-     * 听起来就是规律性的一下卡顿。
-     *
-     * 这里把起播门槛提到 200ms、音轨缓冲提到 120ms，留足余量盖过那 70ms 的停发，
-     * 代价是声音整体晚约 120ms（投屏场景听不出来）。
-     */
-    private val continuousTuning: AudioTuning = prefs.playbackTuning().let {
-        AudioTuning(
-            // 起播门槛给足：第一批数据是突发来的（实测 742～1157 包/秒），
-            // 攒到 400ms 就急着放，后面紧跟的低谷立刻把它放空，开头会抖好几秒。
-            // 攒到 1000ms 再出声，一次到位，之后靠 1500ms 的削峰目标维持。
-            startMillis = 1_000,
-            // 削峰目标就是长期维持的缓冲量。控制连接上音频和视频、文本挤在一条 TCP 里，
-            // 实测到达速率在 111～1157 包/秒之间剧烈抖动（v276 日志），低谷持续 1 秒以上。
-            // 缓冲要够厚才能把这些低谷抹平，代价是声音晚约 1 秒（投屏场景听不出）。
-            targetMillis = 1_500,
-            maxMillis = 3_000,
-            trackMillis = 300,
-            // 不要「起播窗口内压回目标」：它会把刚到的突发削掉，紧接着的低谷就没人补，直接放空。
-            startWindowMillis = 0,
-            // 也不要长期削峰：削掉的数据补不回来，只会让后续更空。
-            trimHoldMillis = 600_000,
-            extraDelayMillis = it.extraDelayMillis,
-            lowLatency = false,
-            mediaStream = it.mediaStream,
-            navigationStream = it.navigationStream,
-        )
-    }
-
-    /**
-     * 导航播报那一路的播放参数：短缓冲。
-     *
-     * 导航是一句一句的短音频，攒太多会让每句开头缺字。90ms 起播 / 60ms 目标 / 300ms 上限，
-     * 足够吸收控制连接上的抖动，又不至于把开头吃掉。
-     */
-    private val navigationTuning: AudioTuning = prefs.playbackTuning().let {
-        AudioTuning(
-            // 和音乐同理：起播门槛给足，别攒一点点就出声（那样第一句导航必断）。
-            startMillis = 500,
-            // 导航和音乐一样走那条拥挤的控制连接，到达抖动同样剧烈（实测低谷 1 秒以上）。
-            // 缓冲不能只给 90ms，否则每句导航都要断好几次；给 800ms 仍比音乐短，听感上不至于拖。
-            targetMillis = 800,
-            maxMillis = 1_500,
-            trackMillis = 150,
-            startWindowMillis = 0,
-            trimHoldMillis = 600_000,
-            extraDelayMillis = 0,
-            lowLatency = false,
-            mediaStream = it.mediaStream,
-            navigationStream = it.navigationStream,
-        )
-    }
-
-    /**
-     * 播视频时的音乐参数：**薄缓冲**，保证音画同步。
-     *
-     * 实测安卓 9 车机：视频从解码到上屏只要 13ms，几乎实时；而纯音乐模式的音频
-     * 总延迟约 1000ms（队列 795 + 音轨 140 + 硬件 62），差了一秒，听起来就是音画不同步。
-     *
-     * 分路之后音乐那一路只有 140 包/秒（不再和导航混在一起翻倍），350ms 缓冲足够吸收
-     * 剩下的抖动；实测视频场景下音乐那路丢包 0ms，所以这个厚度是安全的。
-     */
-    private val videoTuning: AudioTuning = prefs.playbackTuning().let {
-        AudioTuning(
-            startMillis = 250,
-            targetMillis = 350,
-            maxMillis = 800,
-            trackMillis = 150,
-            startWindowMillis = 0,
-            trimHoldMillis = 600_000,
-            extraDelayMillis = 0,
-            lowLatency = false,
-            mediaStream = it.mediaStream,
-            navigationStream = it.navigationStream,
-        )
-    }
-
     /** 抓包到第一次有音频回调时才建（没声明扬声器、手机没要声音的连接不用开线程和文件）。 */
     private var capture: AudioCapture? = null
 
@@ -141,6 +62,9 @@ internal class AudioOutput(
 
     /** 焦点决定的各用途音量（新建的播放器也照这个设）。 */
     private val volumes = EnumMap<AudioUsage, Float>(AudioUsage::class.java)
+
+    /** 最近一次收到控制连接上的声音的时间（elapsedRealtime）；在 [lock] 里读写。 */
+    private var lastControlAudioAt = Long.MIN_VALUE / 2
     private var focus: AudioFocusController? = null
     private var closed = false
     private var muted = 0L
@@ -148,40 +72,22 @@ internal class AudioOutput(
     /**
      * 视频是不是在播（决定音乐用厚缓冲还是薄缓冲）。
      *
-     * 视频链路只要 13ms，音频厚缓冲却要 1000ms，差一秒就是音画不同步。
-     * 播视频时切薄缓冲（350ms），纯听音乐时用厚缓冲（1500ms）保证不断音。
+     * 视频链路只要十几毫秒，音频厚缓冲却要一秒多，差一秒就是音画不同步（实测安卓 9 车机播视频时很明显）。
+     * 播视频时音乐改用薄缓冲，纯听音乐时用厚缓冲保证不断音。
      */
     @Volatile
     private var videoActive = false
 
     /**
-     * 视频开始/停止出帧时由视频侧调用。
-     *
-     * 只影响**之后新建**的音乐播放器：已经在播的播放器换缓冲要重建音轨，会断一下声音，
-     * 比不同步更难受。实际使用中投屏时视频流一直在，第一个音乐播放器建出来就是对的。
+     * 一个播放器对应的一路声音。[lane] 是这一路的编号（[AudioPacket.lane]，见 [AudioBus.lane]）：手机往一路声音里混进
+     * 提示音之类时，SSRC 高 16 位的用途会变（例如 1 → 4097、1 → 0），SSRC 的附加标志位也会来回换，这些都还是同一路，
+     * 要接着用原来的播放器，不然会同时有两个播放器交替放空。载荷带包尾路号时只按包尾分路。用途变了要换声道时 [route]
+     * 不同，照样分开。
      */
-    fun onVideoActive(active: Boolean) {
-        if (videoActive == active) return
-        videoActive = active
-        DiagnosticLog.log(
-            TAG,
-            "[$attemptId] 视频${if (active) "开始出帧，音乐改用薄缓冲（保证音画同步）" else "停止出帧，音乐恢复厚缓冲"}",
-        )
-    }
-
-    /**
-     * 一路声音的键。
-     *
-     * [dataSessionId] 为 [CONTINUOUS_SESSION] 表示这是跨数据会话连续的一条流（鸿蒙 4.2 的控制连接私有帧）：
-     * 手机每 3 秒拆一次数据会话换新号，但声音是连着的一条，不能跟着会话拆播放器。
-     */
-    private data class StreamKey(val dataSessionId: String, val ssrc: Long, val route: AudioRoute)
-
-    /** 导航播报时音乐保留的音量比例（再乘上焦点给的音量）。 */
-    private val NAVIGATION_DUCK_VOLUME = 0.3f
+    private data class StreamKey(val dataSessionId: String, val lane: Long, val route: AudioRoute)
 
     /** 一路声音。[sounding] 跟着播放器的「开始出声 / 放空」走，焦点按它算这个用途还在不在响。 */
-    private inner class Stream(val key: StreamKey, val usage: AudioUsage, val bus: Int) : AudioPlayer.Listener {
+    private inner class Stream(val key: StreamKey, val usage: AudioUsage) : AudioPlayer.Listener {
         lateinit var player: AudioPlayer
         var packets = 0L
         private var sounding = false
@@ -205,10 +111,6 @@ internal class AudioOutput(
         fun sound(on: Boolean) {
             if (on == sounding || (on && finished)) return
             sounding = on
-            // 导航播报开始/结束：音乐那一路跟着压低 / 恢复。
-            // 鸿蒙 4.2 把音乐和导航交织在同一条控制连接上，这里靠 route 分成两个播放器，
-            // 才有机会只压音乐、不压导航。见 [duckForNavigation]。
-            if (key.route == AudioRoute.NAVIGATION) duckForNavigation(on)
             val controller = focusController() ?: return
             if (on) controller.soundStarted(usage) else controller.soundStopped(usage)
         }
@@ -220,7 +122,7 @@ internal class AudioOutput(
             player.close()
         }
 
-        fun label(): String = "${key.route.label}（${if (bus >= 0) "第 $bus 路" else "SSRC ${key.ssrc}"}）"
+        fun label(): String = "${key.route.label}（${AudioBus.laneLabel(key.lane)}）"
     }
 
     override fun onAudioEvent(event: AudioEvent) {
@@ -241,13 +143,19 @@ internal class AudioOutput(
             is AudioEvent.StreamRouted ->
                 if (event.unknownUsage) DiagnosticLog.log(TAG, "[$attemptId] SSRC ${event.ssrc} 带的用途 ${event.usage} 不认识，按媒体放")
             is AudioEvent.CodecVerdict -> onVerdict(event)
+            is AudioEvent.TransportFallback -> event.phone?.let { phone ->
+                prefs.addUdpPhone(phone)
+                DiagnosticLog.log(TAG, "[$attemptId] $event；记下这台手机，下次连接直接用 UDP")
+            }
             is AudioEvent.Ended -> {
                 stopSession(event.stream.dataSessionId, "数据会话结束（${event.reason.label}）")
                 // 手机拆掉数据会话就是不放了：焦点一并放掉（通话中的通话焦点除外），它重新出声时会再要；被新的替换时不放。
-                // 连续流（4.2 控制连接私有帧）只是换了个会话号，声音还在，不能放焦点——否则车机会停掉别的声音、
-                // 我们 25ms 后再申请回来，听起来又是一下顿。
+                // 例外：声音正在走控制连接时（老鸿蒙），手机每隔几秒就拆一次没连上的数据会话，声音却一直在放，这时不放焦点，
+                // 焦点跟着控制连接那一路的出声、停声走。只看最近 [CONTROL_AUDIO_ACTIVE_MS] 内有没有收到：纯血鸿蒙只在数据连接
+                // 连上前从控制连接送一点，之后照常放焦点。
                 if (event.reason == AudioEndReason.PEER_TEARDOWN || event.reason == AudioEndReason.LISTEN_FAILED) {
-                    if (!hasContinuousStream()) synchronized(lock) { focus }?.dataSessionEnded()
+                    val since = SystemClock.elapsedRealtime() - synchronized(lock) { lastControlAudioAt }
+                    if (since > CONTROL_AUDIO_ACTIVE_MS) synchronized(lock) { focus }?.dataSessionEnded()
                 }
             }
             is AudioEvent.PeerClosed -> stopSession(event.stream.dataSessionId, "数据连接断开")
@@ -278,6 +186,7 @@ internal class AudioOutput(
                 return
             }
             val stream = streamFor(packet, stale) ?: return
+            if (packet.stream.dataSessionId.startsWith(AudioStreamInfo.CONTROL_SESSION_ID)) lastControlAudioAt = SystemClock.elapsedRealtime()
             val target = stream.player
             when (packet.codec) {
                 AudioCodec.PCM -> target.queuePcm(
@@ -296,6 +205,18 @@ internal class AudioOutput(
                 )
             }
         }
+    }
+
+    /**
+     * 视频开始/停止出帧时由视频侧调用。
+     *
+     * 只影响**之后新建**的音乐播放器：已经在播的播放器换缓冲要重建音轨，会断一下声音，比不同步更难受。
+     * 实际使用中投屏时视频流一直在，第一个音乐播放器建出来就是对的。
+     */
+    fun onVideoActive(active: Boolean) {
+        if (videoActive == active) return
+        videoActive = active
+        DiagnosticLog.log(TAG, "[$attemptId] 视频${if (active) "开始出帧，音乐改用薄缓冲（保证音画同步）" else "停止出帧，音乐恢复厚缓冲"}")
     }
 
     /** 连接结束：停掉播放、放掉焦点、写完抓包。只在调度线程上调用（执行器已经停了，不会再有回调）。 */
@@ -394,7 +315,7 @@ internal class AudioOutput(
      */
     private fun streamFor(packet: AudioPacket, stale: MutableList<Stream>): Stream? {
         val info = packet.stream
-        val key = StreamKey(keySessionId(packet), packet.ssrc, packet.route)
+        val key = StreamKey(info.dataSessionId, packet.lane, packet.route)
         streams[key]?.let { existing ->
             if (existing.player.format.encoding == encodingOf(packet.codec)) return existing
             streams.remove(key)
@@ -411,49 +332,19 @@ internal class AudioOutput(
             return unsupported(info, e.message ?: "格式不支持")
         }
         val usage = usageOf(packet.route)
-        val stream = Stream(key, usage, packet.bus)
-        // 连续流（鸿蒙 4.2 控制连接私有帧）用攒得更多的参数：手机每 3 秒换号会停发几十毫秒，
-        // 默认的 80ms 起播 / 40ms 音轨盖不住，会每 3 秒放空卡一下。见 [continuousTuning]。
-        //
-        // 导航那一路用**短缓冲**：导航播报是「说完就停」的短句，攒 300ms 才出声会让
-        // 每句开头的第一个字被吃掉，而且导航结束后那 300ms 的尾巴会拖出来。
-        // 音乐那一路是连续的，用长缓冲盖住手机每 3 秒换会话的停发。
-        val chosen = when {
-            packet.route == AudioRoute.NAVIGATION -> navigationTuning
-            // 播视频时用薄缓冲，否则音频比画面晚一秒，音画不同步。
-            packet.continuous && videoActive -> videoTuning
-            packet.continuous -> continuousTuning
-            else -> tuning
-        }
-        stream.player = AudioPlayer(format, stream, chosen, usage)
+        val stream = Stream(key, usage)
+        // 播视频时音乐不垫：垫下去就是一秒的音画不同步。纯听音乐时垫（无线还要再多垫一点）。
+        val videoThin = videoActive && usage == AudioUsage.MEDIA
+        val cushioned = wireless && !videoThin && (usage == AudioUsage.MEDIA || usage == AudioUsage.NAVIGATION)
+        stream.player = AudioPlayer(format, stream, if (cushioned) tuning.withCushion(WIRELESS_CUSHION_MILLIS) else tuning, usage)
         volumes[usage]?.let { stream.player.setVolume(it) }
         streams[key] = stream
         DiagnosticLog.log(
             TAG,
             "[$attemptId] 建播放器：${stream.label()}，$format，音轨用途 ${usage.label}" +
-                "（按载荷判断是 ${packet.codec.label}，声明的是 ${info.codec.label}）；$chosen",
+                "（按载荷判断是 ${packet.codec.label}，声明的是 ${info.codec.label}）；${stream.player.tuning}",
         )
         return stream
-    }
-
-    /**
-     * 导航播报时把音乐压低。
-     *
-     * 为什么需要：鸿蒙 4.2 在导航播报时把「音乐」和「导航」两条独立 PCM 流交织在同一条
-     * 控制连接上发（组头 +10 字段 8 / 0x1000 区分，见 [PrivateAudioFrames]）。以前两路被
-     * 当成一条流混着播，既卡又听不清导航。现在分成两个播放器，导航一出声就把音乐压到
-     * [NAVIGATION_DUCK_VOLUME]，导航播完恢复。
-     *
-     * 只在**导航真的在响**时压：导航那路放空（播报间隙）就恢复，不会一直闷着音乐。
-     */
-    private fun duckForNavigation(navigating: Boolean) {
-        val media = synchronized(lock) {
-            streams.values.filter { it.key.route == AudioRoute.MEDIA }
-        }
-        for (stream in media) {
-            val base = synchronized(lock) { volumes[stream.usage] } ?: 1f
-            stream.player.setVolume(if (navigating) base * NAVIGATION_DUCK_VOLUME else base)
-        }
     }
 
     private fun unsupported(stream: AudioStreamInfo, why: String): Stream? {
@@ -462,34 +353,7 @@ internal class AudioOutput(
         return null
     }
 
-    /**
-     * 播放器用哪个键。连续流（鸿蒙 4.2 控制连接私有帧）用一个固定键，不跟数据会话号走——
-     * 手机每 3 秒换一次会话号，跟着走就会每 3 秒关掉播放器重建一次。
-     */
-    private fun keySessionId(packet: AudioPacket): String =
-        if (packet.continuous) CONTINUOUS_SESSION else packet.stream.dataSessionId
-
-    /**
-     * 现在有没有连续声音流（鸿蒙 4.2 控制连接私有帧）。
-     *
-     * 有的话，数据会话拆除只是换号，焦点不能放——放了车机会停掉别的声音，
-     * 我们 25ms 后再申请回来，听起来就是一下顿。
-     */
-    private fun hasContinuousStream(): Boolean = synchronized(lock) {
-        streams.keys.any { it.dataSessionId == CONTINUOUS_SESSION }
-    }
-
-    /**
-     * 停掉一个数据会话的播放器。
-     *
-     * [dataSessionId] 是连续流的固定键时不停——那条流还在，只是手机换了个会话号。
-     * 连续流真正结束（整个连接结束、[close]）时才由 [close] 统一关。
-     */
     private fun stopSession(dataSessionId: String, why: String) {
-        if (dataSessionId == CONTINUOUS_SESSION) {
-            DiagnosticLog.log(TAG, "[$attemptId] 数据会话换号（$why），连续的声音流不停，播放器留着")
-            return
-        }
         val stopped = synchronized(lock) {
             val gone = streams.values.filter { it.key.dataSessionId == dataSessionId }
             for (stream in gone) streams.remove(stream.key)
@@ -504,15 +368,14 @@ internal class AudioOutput(
     private companion object {
         const val TAG = "OpenHC-Audio"
 
-        /**
-         * 连续声音流的固定键（鸿蒙 4.2 控制连接私有帧）。
-         *
-         * 不会和手机的 `DataSessionID` 撞：那个是十进制数字，这个是带前缀的字符串。
-         */
-        const val CONTINUOUS_SESSION = "continuous-control-audio"
-
         /** 每一路每这么多包记一行统计（媒体 AAC 约 10 秒）。 */
         const val STATS_EVERY = 500L
+
+        /** 无线时音乐和导航多攒的毫秒数：车机扫描 WiFi 时投屏信道一次停 0.1～0.3 秒，留点余量。 */
+        const val WIRELESS_CUSHION_MILLIS = 300
+
+        /** 控制连接上的声音这么久之内收到过，就算还在放。 */
+        private const val CONTROL_AUDIO_ACTIVE_MS = 1_500L
 
         fun encodingOf(codec: AudioCodec): AudioPlayer.Encoding =
             if (codec == AudioCodec.PCM) AudioPlayer.Encoding.PCM_16 else AudioPlayer.Encoding.AAC
