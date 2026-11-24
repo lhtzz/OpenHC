@@ -46,7 +46,7 @@ android {
         // versionCode = 主版本 × 10000 + 次版本 × 100 + 补丁号。
         // 这个分支是「上游 0.2.0 + 鸿蒙 4.2 音频修复 + 低版本车机适配」的衍生版：
         // 加 50 跟上游 0.2.0（200）区分开，装到车机上时一眼能看出跑的是哪个包。
-        versionCode = 283
+        versionCode = 284
         versionName = "harmony4.2-NEXT-0.2.0-android4"
         // 方法数超过 64K，安卓 4.x 要用 MultiDex 分包（5.0 起系统自带）。
         multiDexEnabled = true

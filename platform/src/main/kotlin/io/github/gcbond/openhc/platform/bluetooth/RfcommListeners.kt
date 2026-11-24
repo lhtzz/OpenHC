@@ -11,57 +11,142 @@ import java.lang.reflect.Method
 import java.util.UUID
 
 /**
- * 开 RFCOMM 服务端监听的几种方式，按「手机还能不能按 UUID 找到我们」的优先级依次试。
+ * 开 RFCOMM 服务端监听：几种开法轮着试，失败了隔一会儿再试，最多 [ROUNDS] 轮。
  *
- * 为什么需要多试：安卓 4.4 的 `BluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord` 里，系统调用失败只抛
- * `IOException("Error: -1")`（源码 `bindListen()` 的四种失败共用一个返回值），光看这句话分不出是
- * 「系统不许第三方应用开监听」「服务记录（SDP）登记被拒」还是「RFCOMM 层整个不可用」。
- * 有的车机（实测安卓 4.4.3 车机）只让系统自带的音频应用用蓝牙，第三方应用的「不加密监听」直接被拒，
- * 但换一种开法可能就通了。
+ * **为什么要重试**：这台车机的「蓝牙共享」就是它的蓝牙协议栈（`com.android.bluetooth`，平台签名，
+ * `sharedUserId=android.uid.bluetooth`，注册 `android.bluetooth.IBluetooth` 的 `AdapterService`）。
+ * 反编译它的 `BluetoothOppRfcommListener` / `BluetoothPbapService` 可以看到，AOSP 自己开监听也是
+ * **最多试 10 次、每次隔 300ms**——系统自己都预期这个调用会失败一阵子（蓝牙刚被唤醒、SDP 还没就绪）。
+ * 我们以前只试一次，30ms 内失败就报错，太快了。
  *
- * 三种带服务记录的开法（手机能按 UUID 查到我们，是真正可用的）：
- * 1. [Adapter.listenUsingInsecureRfcommWithServiceRecord]：不加密、不要求认证（默认用这个）；
- * 2. `listenUsingRfcommWithServiceRecord`：要求认证 + 加密（手机上可能要按一次配对确认）；
- * 3. `listenUsingEncryptedRfcommWithServiceRecord`：只要加密、不要求认证（隐藏接口，反射调）。
+ * **为什么几种开法都要试**：安卓 4.4 的 `BluetoothSocket.bindListen()` 里，四种失败
+ * （服务没绑上 / 跨进程失败 / 系统拒绝 / 读通道号失败）共用 `-1`，`BluetoothAdapter` 只把它拼成
+ * `IOException("Error: -1")`，光看这句话分不出原因。带服务记录的开法有三种：
+ * 1. [BluetoothAdapter.listenUsingInsecureRfcommWithServiceRecord]：不加密、不要求认证（AOSP 的 OPP 就用这个）；
+ * 2. `listenUsingEncryptedRfcommWithServiceRecord`：只要加密、不要求认证（隐藏接口，反射调，AOSP 的 PBAP 用这个）；
+ * 3. `listenUsingRfcommWithServiceRecord`：要求认证 + 加密（手机上可能要按一次配对确认）。
  *
  * 都不成时再试「指定通道号开监听」（`listenUsingInsecureRfcommOn` / `listenUsingRfcommOn`，都是隐藏接口）：
  * 这种开法不登记服务记录，手机找不到我们，**不能真用**；只是为了分辨「RFCOMM 层本身能不能开」和
  * 「只是服务记录登记被拒」。试完立刻关掉。
+ *
+ * 真的全失败时，用 [diagnose] 给出归因（不在当前用户下 / 蓝牙服务没绑上 / 协议栈拒绝），
+ * 而不是笼统地说「车机不让开」。
  */
 object RfcommListeners {
 
     /** 一次尝试的结果。[socket] 不为 null 表示开成了（调用方负责关）。 */
-    class Attempt(val how: String, val socket: BluetoothServerSocket?, val error: String?)
+    class Attempt(
+        val how: String,
+        val socket: BluetoothServerSocket?,
+        val error: String?,
+        /** 试了几轮才成（失败时是总共试的轮数）。 */
+        val rounds: Int = 1,
+    )
 
     /** 带服务记录的开法，手机能按 UUID 找到我们。返回第一个开成的；都失败时 socket 为 null。 */
-    fun openWithServiceRecord(adapter: BluetoothAdapter, serviceName: String, uuid: UUID): Attempt {
-        val attempts = mutableListOf<Attempt>()
-        attempts += attempt("不加密监听") {
-            @Suppress("DEPRECATION")
-            adapter.listenUsingInsecureRfcommWithServiceRecord(serviceName, uuid)
+    fun openWithServiceRecord(
+        adapter: BluetoothAdapter,
+        serviceName: String,
+        uuid: UUID,
+        rounds: Int = ROUNDS,
+        intervalMillis: Long = INTERVAL_MS,
+        sleep: (Long) -> Unit = { Thread.sleep(it) },
+        cancelled: () -> Boolean = { false },
+    ): Attempt = openWithRetry(
+        openers = listOf(
+            // 不加密、不要求认证：手机不用先配对就能连（AOSP 的 OPP 也用这个）。
+            "不加密监听" to {
+                @Suppress("DEPRECATION")
+                adapter.listenUsingInsecureRfcommWithServiceRecord(serviceName, uuid)
+            },
+            // 只加密、不要求认证：手机不用先配对就能连，行为和不加密最接近，排在第二。
+            "只加密监听" to {
+                invokeListenWithRecord(adapter, "listenUsingEncryptedRfcommWithServiceRecord", serviceName, uuid)
+            },
+            // 要求认证 + 加密：手机上可能会弹配对确认，只在前面都不成时才用。
+            "加密+认证监听" to {
+                @Suppress("DEPRECATION")
+                adapter.listenUsingRfcommWithServiceRecord(serviceName, uuid)
+            },
+        ),
+        rounds = rounds,
+        intervalMillis = intervalMillis,
+        sleep = sleep,
+        cancelled = cancelled,
+    ).also { opened ->
+        if (opened.socket != null) {
+            Log.i(TAG, "开监听成了：${opened.how}（第 ${opened.rounds} 轮）")
         }
-        // 只加密、不要求认证：手机不用先配对就能连，行为和不加密最接近，排在第二。
-        attempts += attempt("只加密监听") {
-            invokeListenWithRecord(adapter, "listenUsingEncryptedRfcommWithServiceRecord", serviceName, uuid)
-        }
-        // 要求认证 + 加密：手机上可能会弹配对确认，只在前面都不成时才用。
-        attempts += attempt("加密+认证监听") {
-            @Suppress("DEPRECATION")
-            adapter.listenUsingRfcommWithServiceRecord(serviceName, uuid)
-        }
-        attempts.firstOrNull { it.socket != null }?.let { opened ->
-            // 退到了后面的开法：记一笔，方便知道这台车机拒的是哪一种（下次可以直接从能用的那种开始）。
-            if (opened !== attempts.first()) {
-                Log.i(TAG, "「${attempts.first().how}」被拒（${attempts.first().error}），改用「${opened.how}」开成了")
+    }
+
+    /**
+     * 按 [openers] 的顺序试，每种试一次算一轮；一轮全失败就等 [intervalMillis] 再试下一轮，最多 [rounds] 轮。
+     * 某一轮里第一个开成就立刻返回。全失败时把最后一轮的报错拼起来交回去。
+     *
+     * [sleep] 只为测试能替换掉，正常运行就是 [Thread.sleep]。
+     */
+    internal fun openWithRetry(
+        openers: List<Pair<String, () -> BluetoothServerSocket?>>,
+        rounds: Int = ROUNDS,
+        intervalMillis: Long = INTERVAL_MS,
+        sleep: (Long) -> Unit = { Thread.sleep(it) },
+        cancelled: () -> Boolean = { false },
+    ): Attempt {
+        require(rounds >= 1) { "至少试一轮" }
+        var last: List<Attempt> = emptyList()
+        var done = 0
+        for (round in 1..rounds) {
+            val attempts = openers.map { (how, body) -> attempt(how, body) }
+            done = round
+            attempts.firstOrNull { it.socket != null }?.let { opened ->
+                return Attempt(opened.how, opened.socket, null, rounds = round)
             }
-            return opened
+            last = attempts
+            // 最后一轮不用再等。
+            if (round < rounds) {
+                // 用户中途取消（关监听）就别再耗下去了，最多拖 3 秒。
+                if (cancelled()) break
+                sleep(intervalMillis)
+                if (cancelled()) break
+            }
         }
-        // 都失败：把三种的报错拼起来交回去（车机日志里看得到，才能判断是哪一类被拒）。
         return Attempt(
-            how = attempts.joinToString("、") { "${it.how} 被拒（${it.error}）" },
+            how = last.joinToString("、") { "${it.how} 被拒（${it.error}）" },
             socket = null,
-            error = attempts.firstOrNull()?.error,
+            error = last.firstOrNull()?.error,
+            rounds = done,
         )
+    }
+
+    /**
+     * 开监听全失败时给出归因。三种可能，按证据强弱排：
+     *
+     * 1. **不在当前用户下**：`AdapterService$AdapterServiceBinder.createSocketChannel` 第一步就是
+     *    `Utils.checkCallerAllowManagedProfiles()`，`callingUser != ActivityManager.getCurrentUser()`
+     *    时直接 `return null`，binder 返回 null 后 `bindListen()` 抛 `Error: -1`。
+     *    多用户车机（主用户 / 访客 / 演示用户）把应用装在副用户下就是这样。
+     * 2. **蓝牙服务没绑上**：`bindListen()` 在 `bluetoothProxy == null` 时也返回 -1（日志「bluetooth is off」）。
+     * 3. **协议栈拒绝**：前面两条都排除，就是 `createSocketChannelNative` 返回负值（SDP 登记不上、RFCOMM 起不来）。
+     *
+     * [probe] 是 [probeFixedChannels] 的结论，用来进一步区分第 3 类里「只是服务记录被拒」还是「整个 RFCOMM 不行」。
+     */
+    fun diagnose(adapter: BluetoothAdapter, probe: String? = null): String {
+        val mine = Process.myUid() / PER_USER_RANGE
+        val foreground = foregroundUser()
+        if (foreground != null && foreground != mine) {
+            return "本应用装在用户 $mine 下，而车机当前是用户 $foreground。" +
+                "这台车机的蓝牙只给当前用户的应用开监听通道，请把 OpenHC 装到当前用户（主用户）下再试。"
+        }
+        if (!serviceBound()) {
+            return "系统蓝牙服务没绑上（BluetoothAdapter.mService 为空）。" +
+                "请先在车机自带的「蓝牙音乐」里连一次手机把蓝牙唤醒，再回来重试。"
+        }
+        val tail = if (probe != null) "；$probe" else ""
+        return "蓝牙服务和用户都没问题，是这台车机的蓝牙协议栈拒绝了监听请求" +
+            "（`createSocketChannelNative` 返回负值，安卓 4.4 只报 Error: -1）$tail。" +
+            "如果探针能按通道号开监听，说明只是服务记录（SDP）登记被拒；否则整个 RFCOMM 服务端都用不了。" +
+            "这台车机可以改用数据线连接。"
     }
 
     /**
@@ -98,10 +183,11 @@ object RfcommListeners {
     }
 
     /**
-     * 蓝牙能力自检（设置页「蓝牙自检」用）：不连手机，直接把三种带服务记录的开法各试一遍，
+     * 蓝牙能力自检（设置页「蓝牙自检」用）：不连手机，把三种带服务记录的开法各试一遍，
      * 再试「按通道号开监听」探针，最后附上环境。返回一段给用户看的中文说明。
      *
      * 只用来判断这台车机给不给本应用开 RFCOMM 服务端；试出来的监听立刻关掉。
+     * 这里每种开法只试一次（不等重试），自检要快；真正连接时走 [openWithServiceRecord] 的 10 轮重试。
      */
     fun selfTest(context: android.content.Context): String {
         val adapter = BluetoothStatus.adapter(context) ?: return "这台车机没有蓝牙适配器。"
@@ -114,18 +200,19 @@ object RfcommListeners {
         sb.append("车机蓝牙：").append(environment(adapter)).append(LINE_BREAK)
         sb.append(LINE_BREAK)
         val uuid = java.util.UUID.fromString("0000FE35-0000-1000-8000-00805F9B34FB")
-        val attempts = mutableListOf<Attempt>()
-        attempts += attempt("不加密监听（默认用这个）") {
-            @Suppress("DEPRECATION")
-            adapter.listenUsingInsecureRfcommWithServiceRecord(TEST_SERVICE_NAME, uuid)
-        }
-        attempts += attempt("只加密监听") {
-            invokeListenWithRecord(adapter, "listenUsingEncryptedRfcommWithServiceRecord", TEST_SERVICE_NAME, uuid)
-        }
-        attempts += attempt("加密+认证监听") {
-            @Suppress("DEPRECATION")
-            adapter.listenUsingRfcommWithServiceRecord(TEST_SERVICE_NAME, uuid)
-        }
+        val attempts = listOf(
+            attempt("不加密监听（默认用这个）") {
+                @Suppress("DEPRECATION")
+                adapter.listenUsingInsecureRfcommWithServiceRecord(TEST_SERVICE_NAME, uuid)
+            },
+            attempt("只加密监听") {
+                invokeListenWithRecord(adapter, "listenUsingEncryptedRfcommWithServiceRecord", TEST_SERVICE_NAME, uuid)
+            },
+            attempt("加密+认证监听") {
+                @Suppress("DEPRECATION")
+                adapter.listenUsingRfcommWithServiceRecord(TEST_SERVICE_NAME, uuid)
+            },
+        )
         var anyOk = false
         for (a in attempts) {
             val ok = a.socket != null
@@ -148,15 +235,10 @@ object RfcommListeners {
             return sb.toString()
         }
         // 一种都不成：再试不带服务记录的探针，区分「RFCOMM 整个不可用」和「只是服务记录被拒」。
-        sb.append("补充检查：").append(probeFixedChannels(adapter)).append(LINE_BREAK)
+        val probe = probeFixedChannels(adapter)
+        sb.append("补充检查：").append(probe).append(LINE_BREAK)
         sb.append(LINE_BREAK)
-        sb.append(
-            "结论：这台车机的蓝牙不给第三方应用开监听通道（系统只回了「Error: -1」）。" +
-                "系统自带的「蓝牙音乐」能用，是因为它有系统权限。可以试试：" + LINE_BREAK +
-                "1. 在车机设置里把本应用加进「后台运行白名单」或「自启动允许」，有的车机只拦没授权的应用；" + LINE_BREAK +
-                "2. 车机如果有多个用户（主用户 / 访客），把 OpenHC 装到主用户下；" + LINE_BREAK +
-                "3. 这台车机只能改用数据线连接，无线连接用不了。",
-        )
+        sb.append("结论：").append(diagnose(adapter, probe))
         return sb.toString()
     }
 
@@ -267,6 +349,15 @@ object RfcommListeners {
 
     /** RFCOMM 通道号上限（`BluetoothSocket.MAX_RFCOMM_CHANNEL`）。 */
     private const val MAX_CHANNEL = 30
+
+    /**
+     * 开监听最多试几轮。和这台车机蓝牙协议栈里 `BluetoothOppRfcommListener` / `BluetoothPbapService`
+     * 的做法一致（反编译 `com.android.bluetooth` 4.4.2 得到：10 次）。
+     */
+    internal const val ROUNDS = 10
+
+    /** 每轮之间等多久（同上，AOSP 是 300ms）。 */
+    internal const val INTERVAL_MS = 300L
 
     private const val TAG = "OpenHC-Rfcomm"
 

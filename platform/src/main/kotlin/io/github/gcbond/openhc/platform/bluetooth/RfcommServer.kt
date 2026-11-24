@@ -88,15 +88,18 @@ class RfcommServer(
     // 权限由调用方在开始前确认；没有时系统抛 SecurityException，下面按开监听失败上报。
     @SuppressLint("MissingPermission")
     private fun run() {
-        // 几种开法依次试（见 RfcommListeners）：有的车机只拒「不加密监听」，换一种就通了。
-        val opened = RfcommListeners.openWithServiceRecord(adapter, serviceName, uuid)
+        // 几种开法轮着试，每轮之间等一会儿，最多 10 轮（见 RfcommListeners：AOSP 自己也是这么试的）。
+        // 用户中途关监听就不再耗下去。
+        val opened = RfcommListeners.openWithServiceRecord(adapter, serviceName, uuid, cancelled = ::isListenerClosed)
         val listener = opened.socket
         if (listener == null) {
-            // 一种都不成：把车机蓝牙的现状和「按通道号开监听」的探针结果一起报上去，
+            // 一种都不成：先给归因，再把车机蓝牙的现状和「按通道号开监听」的探针结果一起记进日志。
             // 光有「Error: -1」分不出是权限、多用户还是协议栈不支持。
-            val env = RfcommListeners.environment(adapter)
             val probe = RfcommListeners.probeFixedChannels(adapter)
-            return failListen("开监听失败：${opened.how}；车机蓝牙：$env；$probe")
+            val reason = RfcommListeners.diagnose(adapter, probe)
+            val env = RfcommListeners.environment(adapter)
+            android.util.Log.w(TAG, "开监听失败：试了 ${opened.rounds} 轮都没成（${opened.how}）；车机蓝牙：$env")
+            return failListen("开监听失败：试了 ${opened.rounds} 轮共 3 种开法都没成。$reason")
         }
         val keep = synchronized(lock) {
             if (!listenerClosed) server = listener
@@ -193,6 +196,8 @@ class RfcommServer(
         const val READ_BUFFER_BYTES = 4096
 
         const val PEER_CLOSED_TEXT = "read return: -1"
+
+        const val TAG = "OpenHC-Rfcomm"
 
         fun daemon(name: String, body: () -> Unit) {
             val t = Thread(body, name)
