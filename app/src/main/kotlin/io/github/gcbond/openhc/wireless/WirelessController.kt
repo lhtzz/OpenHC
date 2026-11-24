@@ -420,7 +420,8 @@ class WirelessController(
         userStopped = false
         if (wirelessPrefs.wiredOnly) return blocked(kind, WirelessNotice.WiredOnly, AutoHold.WIRED_ONLY)
         if (wiredActive()) return blocked(kind, WirelessNotice.WiredActive, AutoHold.WIRED_ACTIVE)
-        // 本地热点安卓 8.0 起才有，更早的车机用不了无线。不要求车机 WiFi 开着：开热点时单射频车机自己的 WiFi 本来就会断。
+        // 热点接口：安卓 8.0 起用系统的本地热点，更早的用隐藏的 setWifiApEnabled（见 WirelessNetworkPlan）。
+        // 不要求车机 WiFi 开着：开热点时单射频车机自己的 WiFi 本来就会断。
         if (!WirelessNetworkPlan.hotspotSupported(Build.VERSION.SDK_INT)) {
             return blocked(kind, WirelessNotice.HotspotUnsupported, AutoHold.HOTSPOT_UNSUPPORTED)
         }

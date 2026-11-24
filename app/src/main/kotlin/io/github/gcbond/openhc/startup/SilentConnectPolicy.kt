@@ -83,7 +83,7 @@ object SilentConnectPolicy {
      * 开机走哪条路。[silent] 关着时一律照旧打开界面（与没有这个设置时完全相同）。
      *
      * 先等插线还是先等无线回连，沿用打开界面时的规则（[waitForCable]，见 [BootStartPolicy.waitForCable]）；
-     * 系统没有本地热点（[hotspotSupported] 为假，安卓 8.0 以下）时用不了无线，照等插线走。
+     * 系统开不了热点（[hotspotSupported] 为假）时用不了无线，照等插线走。
      * 凡是只有界面才补得上的前提（身份参数、VPN 授权、无线运行时权限）缺了，就打开界面，不在后台什么都不做。
      */
     fun route(

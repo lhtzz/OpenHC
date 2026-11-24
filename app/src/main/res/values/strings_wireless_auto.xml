@@ -19,7 +19,7 @@
     <string name="wireless_auto_hold_wired_only">「只用数据线连接」开着：不发蓝牙广播、不等手机回连。</string>
     <string name="wireless_auto_hold_paused">无线自动回连暂停了（点过停止）。点「开始无线连接」恢复。</string>
     <string name="wireless_auto_hold_wired">有线连接在进行，结束后自动回到等手机回连。</string>
-    <string name="wireless_auto_hold_hotspot_unsupported">这台车机是安卓 5.0 以下，系统没有可用的开热点接口，用不了无线连接（插线照常可用）。</string>
+    <string name="wireless_auto_hold_hotspot_unsupported">这台车机的系统没有可用的开热点接口，用不了无线连接（插线照常可用）。</string>
     <string name="wireless_auto_hold_identity">安装包不完整，自动回连没在等。</string>
     <string name="wireless_auto_hold_no_phone">还没有配对过的手机：扫码配对一次以后，下次靠近就会自己连上。</string>
     <string name="wireless_auto_hold_bt_off">车机蓝牙关着，打开后会自动等手机回连。</string>

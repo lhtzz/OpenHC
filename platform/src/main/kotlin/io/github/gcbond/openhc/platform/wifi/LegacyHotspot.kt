@@ -9,15 +9,15 @@ import java.security.SecureRandom
 import java.util.BitSet
 
 /**
- * 安卓 8.0 以下（API 21～25）开热点用的旧接口。
+ * 安卓 8.0 以下（API 16～25）开热点用的旧接口。
  *
  * 系统从安卓 8.0 才提供「只供本地通信」的 `startLocalOnlyHotspot`；更早的版本只有隐藏接口
- * `WifiManager.setWifiApEnabled(WifiConfiguration, boolean)`（安卓 5.0～7.1 上是 `@SystemApi`，不在公开 SDK 里），
+ * `WifiManager.setWifiApEnabled(WifiConfiguration, boolean)`（安卓 4.1～7.1 上是 `@hide`，不在公开 SDK 里），
  * 它没有「只给本地用」的语义，就是把车机变成普通个人热点：**手机走这个热点上网时用的是车机的数据网络**
  * （车机没有联网时手机也上不了网，这一点和安卓 8.0 的本地热点不同）。
  *
  * 权限（AOSP 源码核实）：
- * - 安卓 5.0/5.1：`CHANGE_WIFI_STATE`（安装即授予）就够；
+ * - 安卓 4.0～5.1：`CHANGE_WIFI_STATE`（安装即授予）就够；这几个版本的 `WifiService.setWifiApEnabled` 只 `enforceChangePermission`；
  * - 安卓 6.0～7.1：`WifiServiceImpl.setWifiApEnabled` 还会调 `ConnectivityManager.enforceTetherChangePermission`，
  *   它要求 `WRITE_SETTINGS` 的 appop（用户在系统设置里授权，`Settings.ACTION_MANAGE_WRITE_SETTINGS`）。
  *

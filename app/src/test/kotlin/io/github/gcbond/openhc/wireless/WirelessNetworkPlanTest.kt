@@ -15,13 +15,13 @@ class WirelessNetworkPlanTest {
             assertTrue(WirelessNetworkPlan.hotspotSupported(sdk), "安卓 $sdk")
             assertFalse(WirelessNetworkPlan.usesLegacyHotspot(sdk), "安卓 $sdk 不该走旧接口")
         }
-        // 安卓 5.0～7.1 走旧的 setWifiApEnabled（普通个人热点）。
-        for (sdk in listOf(21, 22, 23, 24, 25)) {
+        // 安卓 4.1～7.1 走旧的 setWifiApEnabled（普通个人热点）。
+        for (sdk in listOf(16, 17, 18, 19, 20, 21, 22, 23, 24, 25)) {
             assertTrue(WirelessNetworkPlan.hotspotSupported(sdk), "安卓 $sdk")
             assertTrue(WirelessNetworkPlan.usesLegacyHotspot(sdk), "安卓 $sdk 要走旧接口")
         }
-        // 安卓 5.0 以下没有可用的开热点接口。
-        for (sdk in listOf(19, 20)) {
+        // 比 minSdk 还低的只在单元测试里出现：按区间算仍然算「不支持」，实际装不上。
+        for (sdk in listOf(14, 15)) {
             assertFalse(WirelessNetworkPlan.hotspotSupported(sdk), "安卓 $sdk")
             assertFalse(WirelessNetworkPlan.usesLegacyHotspot(sdk), "安卓 $sdk")
         }
@@ -29,7 +29,7 @@ class WirelessNetworkPlanTest {
 
     @Test
     fun theMinimumIsTheOldInterfaceNotTheLocalOnlyHotspot() {
-        assertEquals(21, WirelessNetworkPlan.LEGACY_HOTSPOT_MIN_SDK)
+        assertEquals(16, WirelessNetworkPlan.LEGACY_HOTSPOT_MIN_SDK)
         assertEquals(26, WirelessNetworkPlan.HOTSPOT_MIN_SDK)
     }
 

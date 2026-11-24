@@ -92,7 +92,7 @@ sealed class WirelessNotice {
         override fun toString() = "BluetoothOff"
     }
 
-    /** 车机系统是安卓 5.0 以下，没有可用的开热点接口：用不了无线连接。 */
+    /** 车机系统没有可用的开热点接口（旧接口反射不到、也不到本地热点）：用不了无线连接。 */
     object HotspotUnsupported : WirelessNotice() {
         override fun toString() = "HotspotUnsupported"
     }
