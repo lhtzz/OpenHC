@@ -173,6 +173,12 @@ sealed class WirelessSignal {
 
     /** 自动回连没在等的原因变了（null = 没有要说明的）。 */
     data class AutoHoldChanged(val hold: AutoHold?) : WirelessSignal()
+
+    /**
+     * 权限已经补齐（从系统设置页回来时复查）。空闲时把还挂着的权限类提示清掉：
+     * 车主已经在系统设置里给了权限，界面上那条「请去打开」就过时了。
+     */
+    object PermissionsSatisfied : WirelessSignal()
 }
 
 /** 无线连接页看的状态。 */
@@ -281,6 +287,12 @@ object WirelessReducer {
         is WirelessSignal.Beacon -> if (state.phase in ATTEMPT_PHASES) state.copy(beacon = signal.status) else state
 
         is WirelessSignal.AutoHoldChanged -> state.copy(autoHold = signal.hold)
+
+        // 只清权限类的提示：连接失败、蓝牙没开之类的原因和权限无关，不能被这一下抹掉。
+        WirelessSignal.PermissionsSatisfied -> when (state.notice) {
+            is WirelessNotice.PermissionsDenied, WirelessNotice.WriteSettingsRequired -> state.copy(notice = null)
+            else -> state
+        }
     }
 
     /** 正在连接、没在收尾：只有这时会话事件才改阶段（收尾时和空闲时迟到的事件不理）。 */

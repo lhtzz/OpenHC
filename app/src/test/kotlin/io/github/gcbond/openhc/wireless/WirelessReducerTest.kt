@@ -261,6 +261,24 @@ class WirelessReducerTest {
     }
 
     @Test
+    fun permissionsSatisfiedClearsOnlyPermissionNotices() {
+        // 车主从系统设置页回来、权限已经给齐：权限类提示要自己消失，不然会一直挂在界面上。
+        for (notice in listOf(
+            WirelessNotice.WriteSettingsRequired,
+            WirelessNotice.PermissionsDenied(listOf("android.permission.WRITE_SETTINGS"), permanently = false),
+        )) {
+            val state = run(WirelessSignal.Blocked(notice), WirelessSignal.PermissionsSatisfied)
+            assertNull(state.notice, "$notice 应该被清掉")
+        }
+        // 和权限无关的原因不能被这一下抹掉。
+        val bluetoothOff = run(WirelessSignal.Blocked(WirelessNotice.BluetoothOff), WirelessSignal.PermissionsSatisfied)
+        assertEquals(WirelessNotice.BluetoothOff, bluetoothOff.notice)
+        // 正在连接时也不动状态。
+        val scanning = run(*untilScan, WirelessSignal.PermissionsSatisfied)
+        assertEquals(WirelessPhase.WAITING_FOR_SCAN, scanning.phase)
+    }
+
+    @Test
     fun toStringHidesTheQrCodeAndPin() {
         val text = run(*untilScan).toString()
         assertFalse(text.contains("135790"))

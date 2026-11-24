@@ -41,6 +41,8 @@ internal class WirelessActions(
     val onOpenSettings: () -> Unit,
     /** 去系统里本应用的设置页（权限被永久拒绝时）。 */
     val onOpenAppSettings: () -> Unit,
+    /** 去系统里的「修改系统设置」页（安卓 6～7 用旧接口开热点时）。 */
+    val onOpenWriteSettings: () -> Unit,
     val onEnableBluetooth: () -> Unit,
     val onResetTrustStore: () -> Unit,
 )
@@ -286,6 +288,11 @@ private fun WirelessButtons(
                 PillButton(start, actions.onStart, primary = false)
             } else {
                 PillButton(stringResource(R.string.wireless_action_grant), actions.onStart)
+            }
+            // 「修改系统设置」只能去系统设置页打开：给它自己的按钮，别让车主以为只能干看着。
+            WirelessNotice.WriteSettingsRequired -> {
+                PillButton(stringResource(R.string.wireless_action_app_settings), actions.onOpenWriteSettings)
+                PillButton(start, actions.onStart, primary = false)
             }
             WirelessNotice.BluetoothOff -> {
                 PillButton(stringResource(R.string.wireless_action_enable_bt), actions.onEnableBluetooth)

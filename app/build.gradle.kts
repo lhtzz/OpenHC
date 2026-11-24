@@ -50,8 +50,8 @@ android {
         // 307 起：合并上游 0.2.7——鸿蒙 3.0/4.x 的声音和投屏上游自己已经适配好了，本分支相对上游
         // 只剩「下探到安卓 6.0」（旧接口开热点、蓝牙地址多路探测）和诊断日志导出的增强。
         // 此前 main 是 259（鸿蒙 4.2 衍生版）、android4 分支是 286。
-        versionCode = 307
-        versionName = "0.2.7-android6"
+        versionCode = 308
+        versionName = "0.2.7-android6.1"
     }
 
     sourceSets {

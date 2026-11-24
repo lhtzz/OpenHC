@@ -71,6 +71,10 @@ object WirelessPermissions {
     /**
      * 申请之后的结论：都有了返回 null；还缺就返回要提示的问题。[canAskAgain] 是系统的「是否该解释原因」：
      * 刚被拒绝之后它还是 false，说明用户选了不再询问（或被策略禁止），只能去系统设置里开。
+     *
+     * [WRITE_SETTINGS] 不参与「永久拒绝」的判断：它是 appop 权限，根本不走运行时弹窗，
+     * `shouldShowRequestPermissionRationale` 对它一律返回 false。算进去会把「还没去系统设置打开」
+     * 误报成「系统不再弹框」，而应用权限页里根本没有这个开关，车主按提示找不到。
      */
     fun afterRequest(
         sdkInt: Int,
@@ -79,9 +83,10 @@ object WirelessPermissions {
     ): WirelessNotice.PermissionsDenied? {
         val missing = missing(sdkInt, granted)
         if (missing.isEmpty()) return null
+        val runtimeMissing = missing.filterNot { it == WRITE_SETTINGS }
         return WirelessNotice.PermissionsDenied(
             missing = missing,
-            permanently = missing.any { !canAskAgain(it) },
+            permanently = runtimeMissing.any { !canAskAgain(it) },
             approximateOnly = sdkInt in S until TIRAMISU && FINE_LOCATION in missing && granted(COARSE_LOCATION),
         )
     }

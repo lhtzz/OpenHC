@@ -6,7 +6,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -269,6 +268,10 @@ class WirelessController(
 
     /** 界面回到前台（含开机自动打开）：「自动连接手机」开着就拨最近连成功的那台（一次蓝牙连接只拨一次）。 */
     fun onAppForeground() = post {
+        // 车主多半刚从系统设置页回来：权限已经给齐的话，把界面上那条过时的提示清掉。
+        if (attempt == null && WirelessPermissions.missing(Build.VERSION.SDK_INT) { granted(it) }.isEmpty()) {
+            apply(WirelessSignal.PermissionsSatisfied)
+        }
         dialFromUi("界面回到前台")
         // 在后台申请热点会被系统拒绝：回到前台时补一次（已经开着或在申请时什么都不做）。
         if (hotspotStandby) warmHotspot()
@@ -573,8 +576,12 @@ class WirelessController(
         watchTermination(current)
     }
 
-    private fun granted(permission: String) =
-        ContextCompat.checkSelfPermission(app, permission) == PackageManager.PERMISSION_GRANTED
+    /**
+     * 权限有没有给。必须走 [WirelessPermissionCheck]：`WRITE_SETTINGS` 是 appop 权限，
+     * `checkSelfPermission` 对它恒返回 DENIED，只有 `Settings.System.canWrite` 才是真的。
+     * 这里和 [WirelessStartFlow] 用同一套判断，否则界面放行、调度又拦下，点「授权」会原地打转。
+     */
+    private fun granted(permission: String) = WirelessPermissionCheck.granted(app, permission)
 
     /** 开始不了：回到空闲，显示原因。 */
     private fun block(notice: WirelessNotice) {

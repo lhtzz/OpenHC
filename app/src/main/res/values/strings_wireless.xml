@@ -43,7 +43,8 @@
     <string name="wireless_notice_bt_unsupported">这台车机没有蓝牙，用不了无线连接。</string>
     <string name="wireless_notice_bt_off">请先打开车机蓝牙。</string>
     <string name="wireless_notice_hotspot_unsupported">这台车机是安卓 5.0 以下，系统没有可用的开热点接口，用不了无线连接。请插数据线连接。</string>
-    <string name="wireless_notice_write_settings">安卓 8.0 以下的车机只能用「普通个人热点」开无线连接，系统要求给本应用「修改系统设置」权限。已为你打开系统设置页：请找到「修改系统设置」并允许，然后回到这里再点「开始」。注意：这种热点会占用车机的数据网络，车机没联网时手机也上不了网。</string>
+    <string name="wireless_notice_write_settings">安卓 8.0 以下的车机只能用「普通个人热点」开无线连接，系统要求给本应用「修改系统设置」权限。请点「去系统设置」，找到「修改系统设置」并允许，然后回到这里再点「开始」。注意：这种热点会占用车机的数据网络，车机没联网时手机也上不了网。</string>
+    <string name="wireless_settings_page_missing">这台车机没有可用的系统设置页。请手动打开「设置 → 应用 → OpenHC → 权限」，把「修改系统设置」打开，再回到这里点「开始」。</string>
     <string name="wireless_notice_permissions">无线连接需要这些权限：%1$s。请点「授权」，在系统框里允许。</string>
     <string name="wireless_notice_permissions_permanent">无线连接需要这些权限：%1$s。系统不再弹框了，请点「去系统设置」，在本应用的权限里打开。</string>
     <string name="wireless_notice_precise_location">请在系统框里选「精确位置」：开热点要用精确位置权限（OpenHC 不读取位置）。</string>
@@ -53,6 +54,7 @@
     <string name="wireless_perm_bluetooth">附近的设备（蓝牙）</string>
     <string name="wireless_perm_nearby_wifi">附近的 WiFi 设备</string>
     <string name="wireless_perm_location">精确位置（开热点要用）</string>
+    <string name="wireless_perm_write_settings">修改系统设置（开热点要用）</string>
     <string name="wireless_perm_list_separator">、</string>
 
     <!-- 结束原因 -->

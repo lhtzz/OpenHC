@@ -101,6 +101,7 @@ private fun permissionNames(permissions: List<String>): String {
             when (it) {
                 WirelessPermissions.BLUETOOTH_CONNECT -> R.string.wireless_perm_bluetooth
                 WirelessPermissions.NEARBY_WIFI_DEVICES -> R.string.wireless_perm_nearby_wifi
+                WirelessPermissions.WRITE_SETTINGS -> R.string.wireless_perm_write_settings
                 else -> R.string.wireless_perm_location
             },
         )

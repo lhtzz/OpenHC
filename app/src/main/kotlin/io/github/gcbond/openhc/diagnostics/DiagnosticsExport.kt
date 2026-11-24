@@ -14,6 +14,7 @@ import io.github.gcbond.openhc.connection.UsbAutoConnect
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.WirelessPreferences
 import io.github.gcbond.openhc.startup.BootStart
+import io.github.gcbond.openhc.wireless.WirelessPermissionCheck
 import io.github.gcbond.openhc.wireless.WirelessPermissions
 import java.io.File
 import java.io.FileOutputStream
@@ -137,7 +138,9 @@ internal object DiagnosticsExport {
         val sdk = Build.VERSION.SDK_INT
         val wireless = WirelessPreferences(app)
         val metrics = app.resources.displayMetrics
-        val missing = WirelessPermissions.missing(sdk) { app.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        // 走 WirelessPermissionCheck：WRITE_SETTINGS 是 appop 权限，checkSelfPermission 对它恒返回拒绝，
+        // 直接用会把「其实已经给了」写成「缺」，看诊断报告时被误导。
+        val missing = WirelessPermissions.missing(sdk) { WirelessPermissionCheck.granted(app, it) }
         return listOf(
             "导出时间" to SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(now),
             "OpenHC" to "${BuildConfig.VERSION_NAME}（${BuildConfig.VERSION_CODE}，${BuildConfig.BUILD_TYPE}）",

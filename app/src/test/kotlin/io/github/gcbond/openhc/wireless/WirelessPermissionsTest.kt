@@ -92,4 +92,17 @@ class WirelessPermissionsTest {
         // 老版本没有「大致位置」这一选：缺精确位置就是缺。
         assertFalse(assertNotNull(WirelessPermissions.afterRequest(29, { it == COARSE_LOCATION }, { true })).approximateOnly)
     }
+
+    @Test
+    fun writeSettingsIsNeverReportedAsPermanentlyDenied() {
+        // 「修改系统设置」是 appop 权限，不走运行时弹窗，shouldShowRequestPermissionRationale 对它一律返回 false。
+        // 不能因此判成「系统不再弹框」：应用权限页里根本没有这个开关，车主按提示找不到。
+        val notice = assertNotNull(WirelessPermissions.afterRequest(25, { it != WRITE_SETTINGS }, { false }))
+        assertEquals(listOf(WRITE_SETTINGS), notice.missing)
+        assertFalse(notice.permanently)
+        assertFalse(notice.approximateOnly)
+
+        // 同一台机器上真的还有运行时权限被永久拒绝时，照样要报「永久」。
+        assertTrue(assertNotNull(WirelessPermissions.afterRequest(31, { false }, { false })).permanently)
+    }
 }

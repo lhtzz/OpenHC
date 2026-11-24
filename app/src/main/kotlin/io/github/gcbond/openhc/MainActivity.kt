@@ -323,6 +323,7 @@ private fun AppRoot(
                 },
                 onOpenSettings = { screen = Screen.SETTINGS },
                 onOpenAppSettings = wirelessStart::openAppSettings,
+                onOpenWriteSettings = wirelessStart::openWriteSettings,
                 onEnableBluetooth = wirelessStart::requestEnableBluetooth,
                 onResetTrustStore = wireless::resetTrustStoreAndStart,
             ),
