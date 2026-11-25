@@ -42,17 +42,24 @@ def check_elf(data, machine):
 
 
 def main(argv):
-    if len(argv) != 2:
-        print(f"Usage: {argv[0]} <apk>", file=sys.stderr)
+    if len(argv) not in (2, 3) or (len(argv) == 3 and argv[2] != "--require-lwip"):
+        print(f"Usage: {argv[0]} <apk> [--require-lwip]", file=sys.stderr)
         return 2
+    require_lwip = len(argv) == 3
     try:
         with zipfile.ZipFile(argv[1]) as apk:
+            modules = ["openhc_legacy_usb"]
+            if require_lwip or any(name.endswith("/libopenhc_lwip_ipv4.so") for name in apk.namelist()):
+                modules.append("openhc_lwip_ipv4")
+                for abi in ("arm64-v8a", "x86_64"):
+                    apk.getinfo(f"lib/{abi}/libopenhc_lwip_ipv4.so")
             for abi, machine in (("armeabi-v7a", 40), ("x86", 3)):
-                try:
-                    check_elf(apk.read(f"lib/{abi}/libopenhc_legacy_usb.so"), machine)
-                except (KeyError, ValueError, struct.error) as error:
-                    raise ValueError(f"{abi}: {error}") from error
-                print(f"{abi}: API 16/17 4 KiB ELF layout OK")
+                for module in modules:
+                    try:
+                        check_elf(apk.read(f"lib/{abi}/lib{module}.so"), machine)
+                    except (KeyError, ValueError, struct.error) as error:
+                        raise ValueError(f"{abi}/{module}: {error}") from error
+                    print(f"{abi}/{module}: API 16/17 4 KiB ELF layout OK")
     except (OSError, ValueError, zipfile.BadZipFile) as error:
         print(f"Legacy USB ELF check failed: {error}", file=sys.stderr)
         return 1

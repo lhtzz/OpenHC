@@ -9,6 +9,7 @@
 | AndroidX、Jetpack Compose | Android 开源项目 | Apache-2.0 |
 | Bouncy Castle（bcprov-jdk18on，只用轻量级 API 做 X25519、Ed25519） | The Legion of the Bouncy Castle Inc. | MIT 风格的 Bouncy Castle 许可，原文见 [licenses/BouncyCastle.txt](licenses/BouncyCastle.txt) |
 | ZXing core（com.google.zxing:core，无线连接页生成配对二维码） | ZXing authors | Apache-2.0，原文见 [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt) |
+| lwIP 2.2.1（noVPN 实验分支） | Swedish Institute of Computer Science、lwIP contributors | BSD-3-Clause，原文见 [lwIP COPYING](../platform/src/main/jni/thirdparty/lwip/COPYING)，来源见 [OPENHC-SOURCE](../platform/src/main/jni/thirdparty/lwip/OPENHC-SOURCE.md) |
 
 ## 只在构建或测试时使用（不进安装包）
 
