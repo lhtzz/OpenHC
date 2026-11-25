@@ -38,8 +38,11 @@
     <string name="log_title">连接日志</string>
     <string name="log_hint">下面是应用自己记的连接过程（不记画面和密钥）。可以用「分享」直接发出去，或「导出到文件夹」存到车机上。</string>
     <string name="log_refresh">刷新</string>
-    <string name="log_clear">清空</string>
-    <string name="log_cleared">日志已清空</string>
+    <string name="log_clear">清空连接日志</string>
+    <string name="log_clear_summary">复测前清除旧日志，只看这次连接过程</string>
+    <string name="log_clear_confirm">只清空已有的连接日志，不影响配对、设置或最近一次崩溃记录。之后的连接仍会记录。</string>
+    <string name="log_cleared">连接日志已清空</string>
+    <string name="log_clear_failed">清空连接日志失败，原日志未清除</string>
     <string name="log_copy">复制</string>
     <string name="log_copied">已复制到剪贴板</string>
     <string name="log_share">分享</string>

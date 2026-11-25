@@ -1,5 +1,6 @@
 package io.github.gcbond.openhc.core.auth
 
+import io.github.gcbond.openhc.core.auth.hichain.HiChainBuild
 import io.github.gcbond.openhc.core.common.MalformedMessageException
 import io.github.gcbond.openhc.core.common.toHex
 import kotlinx.serialization.json.JsonPrimitive
@@ -108,6 +109,72 @@ class HiCarAuthSessionTest {
     }
 
     @Test
+    fun repeatedUsbReconnectHandshakeStillVerifiesStsProof() {
+        val store = pairedStore()
+        val before = TrustStoreCodec.encode(store.snapshot())
+        val sts = Vectors.scenario("sts")
+        val s = session(store, Vectors.string(sts, "carSeed"), pin = null)
+        val hello = handshake(false)
+        val handshakes = s.feed(bytes(hello + hello))
+        val reply = env["handshakeWithoutPin"]!!.jsonPrimitive.content
+        assertEquals(listOf(reply, reply), handshakes.sentText())
+        val answers = handshakes.filterIsInstance<HiCarAuthAction.HandshakeAnswered>()
+        assertEquals(listOf(AuthMode.TRUSTED_RECONNECT, AuthMode.TRUSTED_RECONNECT), answers.map { it.mode })
+        assertTrue(answers.all { it.pinCode == null })
+        assertFalse(s.isFinished)
+
+        val exchange = Vectors.phoneMessages("sts").flatMap { s.feed(bytes(phoneEnvelope(3, it))) }
+        assertEquals(Vectors.strings(env["wrapped"]!!.jsonObject["sts"]), exchange.sentText())
+        val success = assertIs<HiCarAuthAction.Succeeded>(exchange.last())
+        assertEquals(Vectors.string(sts, "sessionKey"), success.sessionKey.toHex())
+        assertEquals(AuthMode.TRUSTED_RECONNECT, success.mode)
+        assertEquals(Synthetic.PHONE_ID, success.peerAuthId)
+        assertTrue(s.isFinished)
+        assertContentEquals(before, TrustStoreCodec.encode(store.snapshot()))
+    }
+
+    @Test
+    fun peerErrorAfterStsStartEndsReconnectWithoutChangingTrust() {
+        val store = pairedStore()
+        val before = TrustStoreCodec.encode(store.snapshot())
+        val s = session(store, Vectors.string(Vectors.scenario("sts"), "carSeed"), pin = null)
+        s.feed(bytes(handshake(false)))
+        val start = s.feed(bytes(phoneEnvelope(3, Vectors.phoneMessages("sts").first())))
+        assertEquals(
+            "认证库消息：收到 0x0011（STS 请求方身份与外层握手：一致），回 0x8011",
+            start.filterIsInstance<HiCarAuthAction.Note>().single().text,
+        )
+
+        val failed = s.feed(bytes(phoneEnvelope(3, HiChainBuild.inform(17))))
+        assertEquals("认证库消息：收到 0x8080，不回", failed.filterIsInstance<HiCarAuthAction.Note>().single().text)
+        val failure = assertIs<AuthFailure.Peer>(assertIs<HiCarAuthAction.Failed>(failed.last()).failure)
+        assertEquals(17, failure.errorCode)
+        assertTrue(failure.afterStsStartResponse)
+        assertTrue(failed.sentText().isEmpty())
+        assertTrue(s.isFinished)
+        assertTrue(s.feed(bytes(handshake(false))).isEmpty())
+        assertContentEquals(before, TrustStoreCodec.encode(store.snapshot()))
+    }
+
+    @Test
+    fun optionalStsIdentityMismatchIsDiagnosticOnlyAndDoesNotExposeIds() {
+        val s = session(pairedStore(), Vectors.string(Vectors.scenario("sts"), "carSeed"), pin = null)
+        s.feed(bytes(handshake(false)))
+        val messages = Vectors.phoneMessages("sts")
+        val peerField = Regex(""""peerAuthId"\s*:\s*"[0-9A-Fa-f]+"""")
+        assertTrue(peerField.containsMatchIn(messages.first()))
+        val otherId = "A1B2C3D4"
+        val start = messages.first().replace(peerField, "\"peerAuthId\":\"$otherId\"")
+        val actions = s.feed(bytes(phoneEnvelope(3, start)))
+        val note = actions.filterIsInstance<HiCarAuthAction.Note>().single().text
+        assertTrue(note.contains("与外层握手：不一致"), note)
+        assertFalse(note.contains(otherId) || note.contains(Synthetic.PHONE_ID), note)
+        assertEquals(Vectors.strings(env["wrapped"]!!.jsonObject["sts"]).first(), actions.sentText().single())
+        val last = s.feed(bytes(phoneEnvelope(3, messages.last()))).last()
+        assertIs<HiCarAuthAction.Succeeded>(last)
+    }
+
+    @Test
     fun wrongPinThroughEnvelopes() {
         val s = session(InMemoryTrustStore(), Vectors.string(Vectors.scenario("wrongPin"), "carSeed"))
         s.feed(bytes(handshake(true)))
@@ -162,6 +229,21 @@ class HiCarAuthSessionTest {
     }
 
     @Test
+    fun reconnectWithPeerRecordButNoMatchingCarKeyIsRefusedWithoutReply() {
+        val snapshot = pairedStore().snapshot()
+        val store = InMemoryTrustStore(TrustStoreSnapshot(emptyList(), snapshot.peers))
+        val before = TrustStoreCodec.encode(store.snapshot())
+        val s = session(store, "x", pin = null)
+        val actions = s.feed(bytes(handshake(false)))
+        assertTrue(actions.sentText().isEmpty())
+        val note = actions.filterIsInstance<HiCarAuthAction.Note>().single().text
+        assertTrue(note.contains("有手机配对记录=true；有车机长期密钥=false"), note)
+        assertIs<AuthFailure.MissingLocalIdentity>(assertIs<HiCarAuthAction.Failed>(actions.last()).failure)
+        assertTrue(s.isFinished)
+        assertContentEquals(before, TrustStoreCodec.encode(store.snapshot()))
+    }
+
+    @Test
     fun wirelessHandshakeIsNotSupportedYet() {
         val s = session(InMemoryTrustStore(), "x")
         val actions = s.feed(bytes(handshake(true, usb = false)))
@@ -193,6 +275,19 @@ class HiCarAuthSessionTest {
     }
 
     /** 手机改走输码时把设备握手连发两遍（中间没有认证数据）：按新的一次重新应答，之后照常配对成功。 */
+    @Test
+    fun diagnosticDoesNotRecordUnrecognizedVersionText() {
+        val marker = "private-test-marker"
+        val infoSeen = mutableListOf<String?>()
+        val s = session(InMemoryTrustStore(), "x", info = { infoSeen += it.version; carInfo })
+        val hello = handshake(true).replace("P_0@00000000000000", marker)
+        val note = s.feed(bytes(hello)).filterIsInstance<HiCarAuthAction.Note>().single().text
+        assertEquals<String?>(marker, infoSeen.single(), "筛选只影响诊断，不改变握手字段")
+        assertTrue(note.contains("version=未识别"), note)
+        assertFalse(note.contains(marker), note)
+    }
+
+    /** 手机把输码设备握手连发两遍（中间没有认证数据）：按新的一次重新应答，之后照常配对成功。 */
     @Test
     fun handshakeRepeatedBeforeAuthDataIsAnsweredAgain() {
         val store = InMemoryTrustStore()

@@ -5,7 +5,7 @@ plugins {
 
 dependencies {
     api(project(":core:common"))
-    // 只用 BouncyCastle 的轻量级 API（X25519、Ed25519），不注册 JCA Provider：
-    // 安卓 6.0 自带的 JDK 没有这两种曲线。
+    // 用 BouncyCastle 的轻量级 API（AES-GCM、X25519、Ed25519），不注册 JCA Provider；
+    // 安卓 4.x 的平台实现不一定提供这些原语。
     implementation(libs.bouncycastle.prov)
 }

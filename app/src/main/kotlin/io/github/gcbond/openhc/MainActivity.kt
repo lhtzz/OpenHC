@@ -6,22 +6,27 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
 import io.github.gcbond.openhc.audio.MicPermission
 import io.github.gcbond.openhc.connection.ConnectionController
+import io.github.gcbond.openhc.connection.ConnectionUiState
 import io.github.gcbond.openhc.connection.DeviceInfo
 import io.github.gcbond.openhc.connection.Notice
 import io.github.gcbond.openhc.connection.Phase
-import io.github.gcbond.openhc.core.hisight.HiSightInput
 import io.github.gcbond.openhc.platform.net.VpnConsent
+import io.github.gcbond.openhc.projection.ProjectionFrame
+import io.github.gcbond.openhc.projection.ProjectionOwner
+import io.github.gcbond.openhc.projection.ProjectionPageSlot
 import io.github.gcbond.openhc.projection.ProjectionView
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
@@ -30,6 +35,7 @@ import io.github.gcbond.openhc.startup.BootStart
 import io.github.gcbond.openhc.startup.BootStartPolicy
 import io.github.gcbond.openhc.ui.HomeActions
 import io.github.gcbond.openhc.ui.HomeView
+import io.github.gcbond.openhc.ui.Palette
 import io.github.gcbond.openhc.ui.SettingsView
 import io.github.gcbond.openhc.ui.WirelessActions
 import io.github.gcbond.openhc.wireless.WirelessController
@@ -64,9 +70,20 @@ class MainActivity : Activity() {
     private lateinit var wirelessStart: WirelessStartFlow
 
     private lateinit var root: FrameLayout
+    private lateinit var menuLayer: FrameLayout
     private var homeView: HomeView? = null
     private var settingsView: SettingsView? = null
-    private var projectionView: ProjectionView? = null
+    private val projectionPage = ProjectionPageSlot(::mountProjectionPage, ::unmountProjectionPage)
+
+    private class ProjectionPage(val frame: ProjectionFrame, val view: ProjectionView, val notice: TextView) {
+        var touchResets: Int? = null
+
+        fun setPresenting(value: Boolean) {
+            if (!value) frame.setProjectionActive(false)
+            view.setPresenting(value)
+            if (value) frame.setProjectionActive(true)
+        }
+    }
 
     private var screen = Screen.HOME
     private var projectionWireless = false
@@ -83,7 +100,14 @@ class MainActivity : Activity() {
         identity = IdentityLoader.load(this)
         wirelessStart = WirelessStartFlow(this) { wireless }
 
-        root = FrameLayout(this).apply { setBackgroundColor(io.github.gcbond.openhc.ui.Palette.Background) }
+        root = FrameLayout(this).apply { setBackgroundColor(Palette.Background) }
+        // 首页、设置盖在投屏画布上，而不是令 SurfaceView 不可见或把它移出窗口。
+        // 用不透明背景遮住画面，子控件没消费的点击也由这层截住。
+        menuLayer = FrameLayout(this).apply {
+            setBackgroundColor(Palette.Background)
+            isClickable = true
+        }
+        root.addView(menuLayer, fillParent())
         setContentView(root)
 
         if (savedInstanceState == null) handleLaunch(intent)
@@ -92,7 +116,7 @@ class MainActivity : Activity() {
 
     /**
      * 订阅三份状态（有线、无线、各自的解码器与触摸重置计数）。
-     * 每次变化都重画当前页面：页面结构简单，整体重建比做增量更新可靠，也不会有漏更新。
+     * 菜单按状态重画；投屏画布随当前会话保留，只更新尺寸、解码器和提示，状态变化不重新挂载视图。
      */
     private fun observe() {
         val j = Job()
@@ -110,7 +134,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         job?.cancel()
-        projectionView?.attachDecoder(null)
+        projectionPage.close()
         super.onDestroy()
     }
 
@@ -140,18 +164,32 @@ class MainActivity : Activity() {
         }
         if (wired.phase == Phase.PAIRING && screen == Screen.SETTINGS) screen = Screen.HOME
 
+        val requested = if (screen != Screen.PROJECTION) null else {
+            ProjectionOwner(projectionWireless, if (projectionWireless) w.attempt else wired.attempt)
+        }
+        val retained = projectionPage.reconcile(requested) { owner ->
+            if (owner.wireless) w.phase == WirelessPhase.PROJECTING && w.attempt == owner.attempt
+            else wired.phase == Phase.PROJECTING && wired.attempt == owner.attempt
+        }
+        retained?.let { entry ->
+            if (requested == null) entry.page.setPresenting(false)
+            updateProjection(entry.page, entry.owner, if (entry.owner.wireless) w.projection else wired)
+        }
+
         when (screen) {
             Screen.HOME -> showHome(wired, w)
             Screen.SETTINGS -> showSettings()
-            Screen.PROJECTION -> showProjection()
+            Screen.PROJECTION -> {
+                menuLayer.visibility = View.GONE
+                retained?.page?.setPresenting(true)
+            }
         }
     }
 
     private fun showHome(
-        wired: io.github.gcbond.openhc.connection.ConnectionUiState,
+        wired: ConnectionUiState,
         w: io.github.gcbond.openhc.wireless.WirelessUiState,
     ) {
-        detachProjection()
         val view = homeView ?: HomeView(this).also { homeView = it }
         view.render(
             wired = wired,
@@ -192,7 +230,6 @@ class MainActivity : Activity() {
     }
 
     private fun showSettings() {
-        detachProjection()
         val view = settingsView ?: SettingsView(this).also { settingsView = it }
         view.render(
             settings = settings,
@@ -208,65 +245,69 @@ class MainActivity : Activity() {
         setContent(view)
     }
 
-    private fun showProjection() {
-        val decoder = if (projectionWireless) wireless.decoder.value else controller.decoder.value
-        val state = if (projectionWireless) wireless.state.value.projection else controller.state.value
-        val resets = if (projectionWireless) wireless.touchResets.value else controller.touchResets.value
-
-        val view = projectionView ?: ProjectionView(this).also { projectionView = it }
-        if (view.parent != null) (view.parent as ViewGroup).removeView(view)
-        view.fullScreen = io.github.gcbond.openhc.connection.DisplayArea.activeFullScreen
-        view.immersive = true
-        view.setVideoSize(state.videoWidth, state.videoHeight)
-        view.onInput = { input: HiSightInput ->
-            if (projectionWireless) wireless.sendInput(input) else controller.sendInput(input)
+    private fun mountProjectionPage(owner: ProjectionOwner): ProjectionPage {
+        val immersive = io.github.gcbond.openhc.connection.DisplayArea.activeFullScreen
+        val view = ProjectionView(this).apply {
+            fullScreen = immersive
+            onInput = { input ->
+                if (owner.wireless) wireless.sendInput(input) else controller.sendInput(input)
+            }
         }
-        view.attachDecoder(decoder)
-        // touchResets 变了就重置一次触摸状态（发送端报告触摸对不上时）。
-        if (view.tag != resets) {
-            view.tag = resets
-            view.resetTouches()
+        val notice = TextView(this).apply {
+            visibility = View.GONE
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            setBackgroundColor(0xAA000000.toInt())
+            setPadding(dp(8), dp(6), dp(8), dp(6))
         }
-
-        val frame = FrameLayout(this).apply { setBackgroundColor(android.graphics.Color.BLACK) }
-        frame.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-
-        val message = when {
-            !state.firstFrame -> getString(R.string.projection_waiting_frame)
-            state.decoderProblem != null -> getString(R.string.projection_decoder_problem, state.decoderProblem)
-            else -> ""
-        }
-        if (message.isNotEmpty()) {
-            frame.addView(
-                TextView(this).apply {
-                    text = message
-                    setTextColor(android.graphics.Color.WHITE)
-                    textSize = 15f
-                    setBackgroundColor(0xAA000000.toInt())
-                    setPadding(dp(8), dp(6), dp(8), dp(6))
-                },
+        val frame = ProjectionFrame(this, immersive).apply {
+            addView(view, fillParent())
+            addView(
+                notice,
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                     leftMargin = dp(12)
                     topMargin = dp(12)
                 },
             )
         }
-        setContent(frame)
+        root.addView(frame, 0, fillParent())
+        return ProjectionPage(frame, view, notice)
     }
 
-    /** 换页时把投屏视图从窗口上摘下来（Surface 还给解码器前要先断开）。 */
-    private fun detachProjection() {
-        projectionView?.let { view ->
-            if (view.parent != null) (view.parent as ViewGroup).removeView(view)
-            view.attachDecoder(null)
+    private fun updateProjection(page: ProjectionPage, owner: ProjectionOwner, state: ConnectionUiState) {
+        page.view.setVideoSize(state.videoWidth, state.videoHeight)
+        page.view.attachDecoder(if (owner.wireless) wireless.decoder.value else controller.decoder.value)
+        val resets = if (owner.wireless) wireless.touchResets.value else controller.touchResets.value
+        if (page.touchResets != resets) {
+            page.touchResets = resets
+            page.view.resetTouches()
         }
+        val message = when {
+            !state.firstFrame -> getString(R.string.projection_waiting_frame)
+            state.decoderProblem != null -> getString(R.string.projection_decoder_problem, state.decoderProblem)
+            else -> ""
+        }
+        if (page.notice.text != message) page.notice.text = message
+        page.notice.visibility = if (message.isEmpty()) View.GONE else View.VISIBLE
     }
 
-    private fun setContent(view: android.view.View) {
-        if (root.childCount == 1 && root.getChildAt(0) === view) return
-        root.removeAllViews()
-        root.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    private fun unmountProjectionPage(page: ProjectionPage) {
+        page.setPresenting(false)
+        page.view.onInput = null
+        page.view.attachDecoder(null)
+        root.removeView(page.frame)
     }
+
+    private fun setContent(view: View) {
+        if (menuLayer.childCount != 1 || menuLayer.getChildAt(0) !== view) {
+            menuLayer.removeAllViews()
+            menuLayer.addView(view, fillParent())
+        }
+        menuLayer.visibility = View.VISIBLE
+    }
+
+    private fun fillParent() =
+        FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
@@ -274,22 +315,12 @@ class MainActivity : Activity() {
         super.onResume()
         // 手机点「车机」图标暂停投屏时要回车机桌面，只在界面在前台时处理（见 CarHome）。
         io.github.gcbond.openhc.connection.CarHome.attach(this)
-        // 记下底部导航栏的实际高度（不管此刻显不显示），「全屏显示」关时按它让出画面、算声明尺寸。
-        root.post {
-            val bar = navigationBarHeight()
-            if (bar > 0) io.github.gcbond.openhc.connection.DisplayArea.measuredNavigationBarHeight = bar
-        }
         wireless.onAppForeground()
     }
 
     override fun onPause() {
         io.github.gcbond.openhc.connection.CarHome.detach(this)
         super.onPause()
-    }
-
-    private fun navigationBarHeight(): Int {
-        val id = resources.getIdentifier("navigation_bar_height", "dimen", "android")
-        return if (id > 0) resources.getDimensionPixelSize(id) else 0
     }
 
     /**

@@ -1,6 +1,7 @@
 package io.github.gcbond.openhc.connection
 
 import io.github.gcbond.openhc.core.common.identity.BluetoothAddress
+import java.security.SecureRandom
 
 /** 车机蓝牙地址取自哪里。 */
 enum class BluetoothSource {
@@ -10,7 +11,10 @@ enum class BluetoothSource {
     /** 用户在设置里手填。 */
     MANUAL,
 
-    /** 都没有：按取不到处理（线上发 `02:00:00:00:00:00`，设备 ID 按退化规则算），有线照样能连。 */
+    /** 只作为 OpenHC 的有线身份，绝不用于无线广播、RFCOMM 或蓝牙配对。 */
+    WIRED_LOCAL,
+
+    /** 没有可用地址：无线不能启动；有线若无法保存专用地址，回退原来的占位规则。 */
     UNAVAILABLE,
 }
 
@@ -22,7 +26,7 @@ data class BluetoothChoice(val address: String?, val source: BluetoothSource)
  *
  * 安卓 6.0 起普通应用读不到本机蓝牙地址（系统只给 `02:00:00:00:00:00`）。有的车机系统把它放在一个普通应用可读的
  * 系统属性里（部分车机把它写在 `persist.sys.bt_addr`）。用户在设置里手填了有效地址时优先用手填的
- * （车主可以借此覆盖系统的值，例如让本应用和车机上另一个投屏应用用不同的身份）；没填就用系统属性；都没有按取不到处理。
+ * （车主可以借此覆盖系统的值）。无线没有手填时用系统地址；有线还可以用保存在本应用里的专用地址。
  *
  * 地址参与 carInfo、控制通道握手、认证身份和设备信息里的本机标识：**地址变了，手机会把车机当成另一台车**，
  * 之前的配对记录对不上，要重新输入连接码。
@@ -71,6 +75,33 @@ object BluetoothAddressPolicy {
         normalize(manual)?.let { return BluetoothChoice(it, BluetoothSource.MANUAL) }
         normalize(systemProperty)?.let { return BluetoothChoice(it, BluetoothSource.SYSTEM_PROPERTY) }
         return BluetoothChoice(null, BluetoothSource.UNAVAILABLE)
+    }
+
+    /**
+     * 已保存的有线身份优先，之后给无线填写真实地址也不会改变有线配对。还没有有线专用身份时，
+     * 沿用现有手填地址（包括 v286 的配置），再尝试系统读取和新建。
+     *
+     * [createLocal] 只能交回已经持久化的值；设置页预览时不生成。
+     */
+    internal fun chooseForWired(
+        systemProperty: String?,
+        manual: String?,
+        savedLocal: String?,
+        createLocal: () -> String? = { null },
+    ): BluetoothChoice {
+        normalize(savedLocal)?.let { return BluetoothChoice(it, BluetoothSource.WIRED_LOCAL) }
+        normalize(manual)?.let { return BluetoothChoice(it, BluetoothSource.MANUAL) }
+        val system = choose(systemProperty, null)
+        if (system.address != null) return system
+        return normalize(createLocal())?.let { BluetoothChoice(it, BluetoothSource.WIRED_LOCAL) } ?: system
+    }
+
+    /** 每套安装独立生成的本地管理单播值，仅用于有线身份；不是实际蓝牙硬件地址。 */
+    internal fun newWiredLocalAddress(random: SecureRandom = SecureRandom()): String {
+        val bytes = ByteArray(BluetoothAddress.SIZE).also(random::nextBytes)
+        bytes[0] = 0x02
+        if (bytes.drop(1).all { it == 0.toByte() }) bytes[bytes.lastIndex] = 1
+        return BluetoothAddress.format(bytes)
     }
 
     /**

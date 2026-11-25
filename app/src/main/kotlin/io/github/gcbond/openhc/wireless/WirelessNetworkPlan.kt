@@ -31,8 +31,9 @@ object WirelessNetworkPlan {
     /** 开热点的时限：间隔最多 3.5 秒 + 系统开热点（实测一两秒）+ 等网卡地址最多 3 秒，再留余量。 */
     const val HOTSPOT_NETWORK_START_MILLIS = 15_000L
 
-    /** 这个系统版本能不能开热点；不能就用不了无线连接。 */
-    fun hotspotSupported(sdkInt: Int): Boolean = sdkInt >= LEGACY_HOTSPOT_MIN_SDK
+    /** 车机自带热点不需要应用开热点；只有应用在旧系统开热点时才做接口探测。 */
+    fun hotspotSupported(sdkInt: Int, carHotspot: Boolean = false, legacyAvailable: () -> Boolean): Boolean =
+        sdkInt >= HOTSPOT_MIN_SDK || (usesLegacyHotspot(sdkInt) && (carHotspot || legacyAvailable()))
 
     /**
      * 这个系统版本开的是不是普通个人热点（安卓 8.0 以下走旧接口）。是的话热点会占用车机的数据网络、

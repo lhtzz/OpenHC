@@ -8,6 +8,7 @@ import io.github.gcbond.openhc.connection.Notice
 import io.github.gcbond.openhc.connection.Phase
 import io.github.gcbond.openhc.connection.Step
 import io.github.gcbond.openhc.core.auth.AuthFailure
+import io.github.gcbond.openhc.core.auth.HcError
 import io.github.gcbond.openhc.core.hisight.HiSightEndReason
 import io.github.gcbond.openhc.core.session.EndReason
 import io.github.gcbond.openhc.platform.usb.WiredEndReason
@@ -126,10 +127,17 @@ private fun wiredEndText(reason: WiredEndReason): Int = when (reason) {
 private fun sessionEndText(context: Context, reason: EndReason): String = when (reason) {
     EndReason.LocalStop -> context.getString(R.string.end_user_stop)
     EndReason.ControlHandshakeTimeout -> context.getString(R.string.end_session_handshake_timeout)
-    is EndReason.AuthFailed -> when (reason.failure) {
+    is EndReason.AuthFailed -> when (val failure = reason.failure) {
         is AuthFailure.ConnectionClosed -> context.getString(R.string.end_session_auth_closed)
         AuthFailure.NotTrusted -> context.getString(R.string.end_session_not_trusted)
-        else -> context.getString(R.string.end_session_auth_failed, reason.failure.toString())
+        AuthFailure.MissingLocalIdentity -> context.getString(R.string.end_session_missing_car_key)
+        is AuthFailure.Peer -> {
+            val text = if (failure.afterStsStartResponse && failure.errorCode == HcError.VERIFY_PROOF_FAILED.code) {
+                R.string.end_session_sts_peer_proof_failed
+            } else R.string.end_session_auth_peer_failed
+            context.getString(text, failure.errorCode)
+        }
+        else -> context.getString(R.string.end_session_auth_failed, failure.toString())
     }
     is EndReason.KeepAliveTimeout -> context.getString(R.string.end_session_keepalive)
     is EndReason.ProjectionEnded -> when (reason.reason) {

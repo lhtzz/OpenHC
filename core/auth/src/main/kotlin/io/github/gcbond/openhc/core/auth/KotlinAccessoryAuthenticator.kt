@@ -45,10 +45,10 @@ import java.security.SecureRandom
  * [AccessoryAuthenticator] 的纯 Kotlin 实现。
  *
  * 行为与原库的车机角色一致：注入同一随机数序列时，发出的每条消息逐字节相同。
- * 放行规则：手机发起 PIN 绑定（BIND）时本次必须配了连接码；发起免码认证（AUTHENTICATE）时必须已信任该手机；
- * 其余操作一律拒绝。
+ * 放行规则：手机发起 PIN 绑定（BIND）时本次必须配了连接码；免码认证（AUTHENTICATE）必须同时有车机已保存的
+ * 长期身份和这台手机的信任记录，不能用一把新生成的车机密钥做免码认证；其余操作一律拒绝。
  *
- * 取随机数的顺序也与之一致（同一序列才能得到同样的消息）：创建时若本机还没有长期身份，先取 32 字节生成
+ * 取随机数的顺序也与之一致（同一序列才能得到同样的消息）：创建时若本机还没有长期身份，且本次允许 PIN 配对时，先取 32 字节生成
  * Ed25519 种子；PAKE 开始：salt 16 → 挑战 16 → 私有指数 32；身份交换：nonce 12；
  * STS 开始：X25519 私钥 32 → salt 16 → nonce 12 → 挑战 16；STS 结束：nonce 12。
  *
@@ -65,8 +65,11 @@ class KotlinAccessoryAuthenticator(
     private val selfId = config.selfAuthId.toByteArray(Charsets.US_ASCII)
     private val peerId = config.peerAuthId.toByteArray(Charsets.US_ASCII)
     private val pin: ByteArray? = config.pin
-    private val identity: LocalIdentity
-    override val peerTrusted: Boolean
+    private val storedIdentity = trustStore.findLocalIdentity(serviceId, selfId)
+    override val hasStoredLocalIdentity: Boolean = storedIdentity != null
+    private val identity = storedIdentity
+        ?: if (pin != null) LocalIdentity(serviceId, selfId, random.draw(Ed25519Keys.KEY_LENGTH)) else null
+    override val peerTrusted: Boolean = trustStore.findPeer(serviceId, peerId) != null
 
     private var state = State.INIT
     private var lastState = State.INIT
@@ -78,12 +81,6 @@ class KotlinAccessoryAuthenticator(
 
     override var isFinished: Boolean = false
         private set
-
-    init {
-        identity = trustStore.findLocalIdentity(serviceId, selfId)
-            ?: LocalIdentity(serviceId, selfId, random.draw(Ed25519Keys.KEY_LENGTH))
-        peerTrusted = trustStore.findPeer(serviceId, peerId) != null
-    }
 
     @Throws(MalformedMessageException::class)
     override fun onMessage(message: String): List<AccessoryAction> {
@@ -101,8 +98,9 @@ class KotlinAccessoryAuthenticator(
             // 对端的错误通知：认证结束，不回包（否则双方会互发通知）。
             // 识别错误通知时字段名区分大小写。
             val errorCode = (root["payload"] as? JsonObject)?.get("errorCode").numberAsInt() ?: HcError.INPUT_ERROR.code
+            val afterStsStartResponse = sts != null && state == State.KEY_AGREEMENT
             finish()
-            return listOf(AccessoryAction.Failed(AuthFailure.Peer(errorCode)))
+            return listOf(AccessoryAction.Failed(AuthFailure.Peer(errorCode, afterStsStartResponse)))
         }
         return receive(root)
     }
@@ -231,7 +229,7 @@ class KotlinAccessoryAuthenticator(
     /** 放行规则（见类说明）。 */
     private fun confirm(op: Int): Boolean = when (op) {
         HcOperation.BIND -> pin != null
-        HcOperation.AUTHENTICATE -> peerTrusted
+        HcOperation.AUTHENTICATE -> peerTrusted && hasStoredLocalIdentity
         else -> false
     }
 
@@ -257,7 +255,8 @@ class KotlinAccessoryAuthenticator(
             Modular.STS -> if (nav.isRequest) {
                 if (sts == null) {
                     if (pake != null || pakeClientBuilt) throw HcFailure(HcError.REPEATED_REFERENCE)
-                    sts = StsServer(selfId, peerId, SESSION_KEY_LENGTH, identity, random) {
+                    // AUTHENTICATE 已通过 confirm，必须使用先前配对保存的密钥。
+                    sts = StsServer(selfId, peerId, SESSION_KEY_LENGTH, checkNotNull(storedIdentity), random) {
                         trustStore.findPeer(serviceId, peerId)?.publicKey
                     }
                 }
@@ -286,14 +285,15 @@ class KotlinAccessoryAuthenticator(
 
     private fun exchange(request: ExchangeMessage): String {
         val server = pake ?: throw HcFailure(HcError.PAKE_OBJECT_ERROR)
-        val result = ExchangeServer.respond(server, request, identity, random)
+        val bindingIdentity = checkNotNull(identity) // 先前的 BIND 已确认允许 PIN 配对。
+        val result = ExchangeServer.respond(server, request, bindingIdentity, random)
         val peer = try {
             TrustedPeer(serviceId, result.peerAuthId, result.peerPublicKey)
         } catch (e: IllegalArgumentException) {
             throw HcFailure(HcError.SAVE_LTPK_FAILED)
         }
         try {
-            trustStore.commitPairing(identity, peer)
+            trustStore.commitPairing(bindingIdentity, peer)
         } catch (e: Exception) {
             throw HcFailure(HcError.SAVE_LTPK_FAILED)
         }

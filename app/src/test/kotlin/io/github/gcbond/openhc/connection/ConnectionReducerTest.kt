@@ -129,6 +129,18 @@ class ConnectionReducerTest {
     }
 
     @Test
+    fun repeatedHandshakeSwitchingToTrustedReconnectClearsOldPin() {
+        val state = run(
+            *untilPhoneConnected,
+            session(SessionEvent.AuthStarted(AuthMode.PIN_PAIRING)),
+            session(SessionEvent.ShowPinCode("123456")),
+            session(SessionEvent.AuthStarted(AuthMode.TRUSTED_RECONNECT)),
+        )
+        assertEquals(Phase.CONNECTING to Step.AUTHENTICATING, state.phase to state.step)
+        assertNull(state.pinCode)
+    }
+
+    @Test
     fun wiredProgressAfterThePhoneConnectedDoesNotMoveThePhaseBack() {
         val connected = run(*untilPhoneConnected, session(SessionEvent.ControlHandshakeCompleted(encrypted = true)))
         // 有线状态和会话事件来自不同线程，迟到的「网络已通」不能把阶段拉回去。
@@ -284,6 +296,25 @@ class ConnectionReducerTest {
     fun pinCodeIsNotPrinted() {
         val state = run(*untilPhoneConnected, session(SessionEvent.ShowPinCode("123456")))
         assertFalse(state.toString().contains("123456"))
+    }
+
+    @Test
+    fun peerAuthFailureIsNotReplacedByUsbDetachOrReplugHint() {
+        val authFailure = EndReason.AuthFailed(AuthFailure.Peer(17))
+        val causes = EndCauseTracker()
+        causes.onSessionEnded(authFailure)
+        causes.onWiredEnded(WiredEndReason.PHONE_UNPLUGGED, null)
+        val cause = assertIs<EndCause.Session>(causes.result())
+        assertSame(authFailure, cause.reason)
+
+        val waiting = run(
+            *untilPhoneConnected,
+            session(SessionEvent.AuthStarted(AuthMode.TRUSTED_RECONNECT)),
+            ConnectionSignal.AttemptFinished(cause, replugRequired = true, keepConnecting = true),
+            ConnectionSignal.ReplugWaiting(unplugged = true),
+        )
+        assertEquals(Phase.REPLUG_REQUIRED to Step.REPLUG_WAIT, waiting.phase to waiting.step)
+        assertEquals(Notice.Ended(cause), waiting.notice)
     }
 
     @Test

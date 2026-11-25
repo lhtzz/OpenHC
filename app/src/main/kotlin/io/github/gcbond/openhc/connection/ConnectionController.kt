@@ -14,14 +14,18 @@ import io.github.gcbond.openhc.IdentityLoader
 import io.github.gcbond.openhc.audio.AudioOutput
 import io.github.gcbond.openhc.audio.MicInput
 import io.github.gcbond.openhc.audio.MicPermission
+import io.github.gcbond.openhc.core.auth.AuthMode
+import io.github.gcbond.openhc.core.auth.ServiceId
 import io.github.gcbond.openhc.core.common.identity.IdentityAssets
 import io.github.gcbond.openhc.core.hisight.AccessUnit
 import io.github.gcbond.openhc.core.hisight.AccessUnitSink
 import io.github.gcbond.openhc.core.hisight.HiSightInput
 import io.github.gcbond.openhc.core.nearby.NearbySession
+import io.github.gcbond.openhc.core.session.EndReason
 import io.github.gcbond.openhc.core.session.ReceiverConfig
 import io.github.gcbond.openhc.core.session.ReceiverSession
 import io.github.gcbond.openhc.core.session.SessionEvent
+import io.github.gcbond.openhc.core.session.SessionLayer
 import io.github.gcbond.openhc.core.session.SocketRunner
 import io.github.gcbond.openhc.core.session.VideoParameters
 import io.github.gcbond.openhc.input.MediaKeys
@@ -36,6 +40,8 @@ import io.github.gcbond.openhc.platform.usb.WiredSessionConfig
 import io.github.gcbond.openhc.platform.usb.WiredState
 import io.github.gcbond.openhc.platform.usb.WiredTimeouts
 import io.github.gcbond.openhc.settings.AppSettings
+import io.github.gcbond.openhc.settings.DiagnosticLog
+import io.github.gcbond.openhc.settings.diagnosticStack
 import io.github.gcbond.openhc.settings.AudioPreferences
 import io.github.gcbond.openhc.settings.ClarityPreferences
 import io.github.gcbond.openhc.settings.MediaKeyPreferences
@@ -126,6 +132,8 @@ class ConnectionController(context: Context) {
     private var connectionWanted = false
     private var attempt: Attempt? = null
     private var attemptCounter = 0
+    /** 只保留本进程最后一次成功输码配对的车机身份，不被失败的回连覆盖。 */
+    private var lastWiredPairing: WiredIdentitySnapshot? = null
     private val gate = ReplugGate(REPLUG_ABSENT_MS)
     private var gatePolling = false
 
@@ -286,7 +294,10 @@ class ConnectionController(context: Context) {
         } catch (e: IOException) {
             return block(Notice.TrustStoreUnavailable(e.message ?: e.javaClass.simpleName))
         }
-        val bluetooth = BluetoothAddressPolicy.choose(DeviceInfo.systemBluetoothAddress(app), settings.manualBluetoothAddress)
+        val bluetooth = settings.wiredBluetoothChoice(DeviceInfo.systemBluetoothAddress(app), createIfMissing = true)
+        if (bluetooth.source == BluetoothSource.UNAVAILABLE) {
+            DiagnosticLog.log(TAG_SESSION, "未能保存有线专用地址，本次沿用旧占位规则。")
+        }
         val fullScreen = settings.fullScreen
         val display = try {
             DisplayPlan.resolve(DisplayArea.screenFor(app, fullScreen), ResolutionChoice.Auto, settings.fps, settings.uiScalePercent)
@@ -323,14 +334,14 @@ class ConnectionController(context: Context) {
         if (!requestForeground()) return block(Notice.StartFailed(FOREGROUND_FAILED))
 
         val grace = UsbAutoConnectPolicy.permissionGraceMs(UsbAutoConnect.isEnabled(app), settings.usbAttachAccepted)
-        val current = Attempt(++attemptCounter, identity, config, grace)
+        val current = Attempt(++attemptCounter, identity, config, grace, bluetooth.source)
         attempt = current
         inputTarget = current
         Log.i(
             TAG,
             "第 ${current.id} 次连接：蓝牙地址来源 ${bluetooth.source}，deviceId ${config.deviceId.take(4)}…，" +
                 "画布 ${display.width}x${display.height}@${display.fps} dpi ${display.dpi}（界面大小 ${settings.uiScalePercent}%）GOP ${display.gop}" +
-                "（全屏${if (DisplayArea.activeFullScreen) "开" else "关，让出底部导航栏 ${DisplayArea.navigationBarHeight(app)} 像素"}），控制端口 $port，" +
+                "（全屏${if (fullScreen) "开" else "关，保留顶部和底部系统栏"}），控制端口 $port，" +
                 "已配对手机 ${trustStore.peerCount} 台，USB 授权宽限 ${grace}ms",
         )
         Log.i(TAG, "第 ${current.id} 次连接的清晰度：${clarity.key}，声明码率 ${VideoClarity.describe(config.display.bitrate)}")
@@ -340,6 +351,7 @@ class ConnectionController(context: Context) {
             "第 ${current.id} 次连接的车机麦克风：" +
                 (mic?.toString() ?: if (micGranted) "关（设置里关了，不声明麦克风）" else "不声明（没有录音权限）"),
         )
+        DiagnosticLog.log(TAG_SESSION, "[${current.id}] 有线车机身份：${current.identitySnapshot().diagnostic(lastWiredPairing)}")
         apply(ConnectionSignal.AttemptStarted(current.id))
         current.runner.start()
         watchTermination(current)
@@ -361,7 +373,16 @@ class ConnectionController(context: Context) {
         val identity: IdentityAssets,
         val config: ReceiverConfig,
         val permissionGraceMs: Long,
+        private val bluetoothSource: BluetoothSource,
     ) {
+        fun identitySnapshot(): WiredIdentitySnapshot {
+            val key = config.trustStore.findLocalIdentity(
+                ServiceId.of(identity.authService),
+                config.deviceId.toByteArray(Charsets.US_ASCII),
+            )?.publicKey
+            return WiredIdentitySnapshot(bluetoothSource, config.deviceId, key)
+        }
+
         val sink = ForwardingSink()
 
         /** 车机媒体键的去处（[MediaKeys]）：按键在主线程上转进来，投到协议线程上发给手机。 */
@@ -442,6 +463,24 @@ class ConnectionController(context: Context) {
     /** 会话事件，在协议线程上。 */
     private fun onProtocolEvent(current: Attempt, event: SessionEvent) {
         if (event is SessionEvent.Diagnostic) Log.d(TAG_SESSION, "[${current.id}] $event") else Log.i(TAG_SESSION, "[${current.id}] $event")
+        val checkpoint = when (event) {
+            is SessionEvent.PhoneConnected -> "手机的 TCP 控制连接已建立"
+            is SessionEvent.ControlHandshakeCompleted -> "控制握手完成"
+            is SessionEvent.AuthStarted -> "开始认证：${event.mode}"
+            is SessionEvent.ShowPinCode -> "已生成连接码（不记录内容）"
+            is SessionEvent.Authenticated -> "认证完成：${event.mode}"
+            is SessionEvent.DeviceSessionReady -> "设备会话已就绪"
+            is SessionEvent.VideoNegotiated -> "已协商视频参数"
+            is SessionEvent.VideoStarted -> "收到首帧视频"
+            // 只持久化认证层的摘要：握手标志、收发消息码；不写连接码、身份或认证报文。
+            is SessionEvent.Diagnostic -> if (event.layer == SessionLayer.AUTH) "认证：${event.message}" else null
+            is SessionEvent.Ended -> when (val reason = event.reason) {
+                is EndReason.AuthFailed -> "协议会话结束：认证失败（${reason.failure}）"
+                else -> "协议会话结束：${reason.javaClass.simpleName}"
+            }
+            else -> null
+        }
+        if (checkpoint != null) DiagnosticLog.log(TAG_SESSION, "[${current.id}] $checkpoint")
         when (event) {
             // 在协议线程上同步建好解码器：之后的帧也在这个线程上送，保证第一帧到时解码器已经接上。
             is SessionEvent.VideoNegotiated -> prepareDecoder(current, event.video)
@@ -485,6 +524,13 @@ class ConnectionController(context: Context) {
         apply(ConnectionSignal.Session(event))
         when (event) {
             is SessionEvent.ControlListening -> startWired(current, event.port)
+            is SessionEvent.Authenticated -> if (event.mode == AuthMode.PIN_PAIRING) {
+                val snapshot = current.identitySnapshot()
+                if (snapshot.hasStoredCarKey) {
+                    lastWiredPairing = snapshot
+                    DiagnosticLog.log(TAG_SESSION, "[${current.id}] 已记录本次有线配对身份的比较基准（仅内存）")
+                }
+            }
             is SessionEvent.VideoNegotiated -> {
                 current.touchNegotiated = event.video.touchInput
                 current.keyNegotiated = event.video.keyInput
@@ -522,7 +568,7 @@ class ConnectionController(context: Context) {
                 post { onWiredState(current, state) }
             }
             // 控制监听事先绑在通配地址上，网卡就绪时不用再绑。
-        })
+        }, diagnosticLog = { DiagnosticLog.log("OpenHC-Wired", "[${current.id}] $it") })
         current.wired = wired
         Log.i(TAG, "控制监听已就绪（端口 $port），carInfo ${carInfo.size} 字节已生成，开始等手机")
         wired.start()
@@ -590,6 +636,7 @@ class ConnectionController(context: Context) {
         if (current.finished) return
         current.runner.failure?.let { failure ->
             Log.e(TAG, "第 ${current.id} 次连接的执行器意外结束", failure)
+            DiagnosticLog.log(TAG_SESSION, "[${current.id}] 执行器意外退出：${diagnosticStack(failure)}")
             current.causes.onFailure("执行器意外结束：${failure.javaClass.simpleName}：${failure.message}")
         }
         if (current.tearingDown) {
@@ -650,7 +697,7 @@ class ConnectionController(context: Context) {
             TAG,
             "第 ${current.id} 次连接已收尾：$cause；" + when {
                 !current.replugRequired -> "没有发过 carInfo"
-                replugPending -> "这次插入已经用过，要拔线等 5 秒再插"
+                replugPending -> "等待 USB 重新接入：拔线等 5 秒再插（上次已发 carInfo）"
                 else -> "手机已经拔下够久，可以直接再插"
             },
         )

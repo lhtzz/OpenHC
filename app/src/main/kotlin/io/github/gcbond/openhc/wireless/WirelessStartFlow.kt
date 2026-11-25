@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import io.github.gcbond.openhc.platform.wifi.LegacyHotspot
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.WirelessPreferences
 
@@ -30,13 +31,13 @@ internal class WirelessStartFlow(
     /** 「开始无线连接」。 */
     fun start() {
         val sdk = Build.VERSION.SDK_INT
-        // 只用数据线连接开着、或系统太老开不了热点：不用申请任何权限，交给调度直接说明原因。
-        if (wirelessPrefs.wiredOnly || !WirelessNetworkPlan.hotspotSupported(sdk)) {
+        // 只用数据线连接开着、或系统没有所需的热点接口：不用申请权限，交给调度说明原因。
+        if (wirelessPrefs.wiredOnly || !WirelessNetworkPlan.hotspotSupported(sdk, wirelessPrefs.carHotspot, LegacyHotspot::available)) {
             controller().start()
             return
         }
         // 安卓 6～7 用旧接口开热点要「修改系统设置」：它不在运行时弹窗里，只能拉起系统设置页让用户打开。
-        if (WirelessPermissions.needsWriteSettings(sdk) && !canWriteSettings()) {
+        if (!wirelessPrefs.carHotspot && WirelessPermissions.needsWriteSettings(sdk) && !canWriteSettings()) {
             Log.i(TAG, "安卓 8.0 以下开热点要「修改系统设置」：拉起系统设置页")
             controller().reportBlocked(WirelessNotice.WriteSettingsRequired)
             openWriteSettings()

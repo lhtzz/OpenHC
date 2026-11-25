@@ -2,6 +2,7 @@ package io.github.gcbond.openhc.connection
 
 import io.github.gcbond.openhc.core.common.identity.HostIdentity
 import io.github.gcbond.openhc.core.nearby.NearbySession
+import java.security.SecureRandom
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -96,6 +97,44 @@ class BluetoothAddressPolicyTest {
         val host = HostIdentity("000000", "00", "合成品牌", "合成车机")
         assertEquals(NearbySession.deviceId(host, "02:00:00:00:00:00"), NearbySession.deviceId(host, null))
         assertNotEquals(NearbySession.deviceId(host, null), NearbySession.deviceId(host, property))
+    }
+
+    @Test
+    fun wiredGeneratesOnlyWhenNeededAndThenKeepsTheSavedChoice() {
+        var generated = 0
+        val create = { generated++; manual }
+        val fallback = BluetoothChoice(manual, BluetoothSource.WIRED_LOCAL)
+        assertEquals(BluetoothChoice(property, BluetoothSource.SYSTEM_PROPERTY),
+            BluetoothAddressPolicy.chooseForWired(property, null, null, create))
+        assertEquals(0, generated)
+        assertEquals(fallback, BluetoothAddressPolicy.chooseForWired(null, null, null, create))
+        assertEquals(fallback, BluetoothAddressPolicy.chooseForWired(property, null, manual, create))
+        assertEquals(fallback, BluetoothAddressPolicy.chooseForWired(null, property, manual, create),
+            "后来为无线填真实地址，不改变既有有线身份")
+        assertEquals(1, generated)
+    }
+
+    @Test
+    fun movingAManualAddressToWiredOnlyKeepsTheUsbIdentityNotTheWirelessOverride() {
+        val host = HostIdentity("000000", "00", "合成品牌", "合成车机")
+        val before = BluetoothAddressPolicy.chooseForWired(property, manual, null)
+        val after = BluetoothAddressPolicy.chooseForWired(property, null, manual)
+        assertEquals(NearbySession.deviceId(host, before.address), NearbySession.deviceId(host, after.address))
+        assertEquals(BluetoothSource.WIRED_LOCAL, after.source)
+        assertEquals(BluetoothChoice(property, BluetoothSource.SYSTEM_PROPERTY), BluetoothAddressPolicy.chooseForWireless(property, null))
+        assertNull(BluetoothAddressPolicy.chooseForWireless(null, null).address)
+    }
+
+    @Test
+    fun wiredLocalAddressIsUnicastAndNeverTheReservedPlaceholder() {
+        val zero = object : SecureRandom() {
+            override fun nextBytes(bytes: ByteArray) = bytes.fill(0)
+        }
+        assertEquals("02:00:00:00:00:01", BluetoothAddressPolicy.newWiredLocalAddress(zero))
+        assertEquals(BluetoothChoice(null, BluetoothSource.UNAVAILABLE),
+            BluetoothAddressPolicy.chooseForWired(null, null, null) { null })
+        assertEquals(BluetoothChoice(manual, BluetoothSource.MANUAL),
+            BluetoothAddressPolicy.chooseForWired(property, manual, null))
     }
 
     /** 属性名清单：常用的几个都在，且第一个就是文档里写的那个。 */

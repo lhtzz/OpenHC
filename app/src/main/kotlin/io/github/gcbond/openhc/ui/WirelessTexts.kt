@@ -121,6 +121,7 @@ private fun wirelessEndText(context: Context, reason: WirelessEndReason): String
     is WirelessEndReason.AuthFailed -> when (reason.failure) {
         is AuthFailure.ConnectionClosed -> context.getString(R.string.wireless_end_auth_closed)
         AuthFailure.NotTrusted -> context.getString(R.string.wireless_end_not_trusted)
+        AuthFailure.MissingLocalIdentity -> context.getString(R.string.wireless_end_missing_car_key)
         else -> context.getString(R.string.wireless_end_auth_failed, reason.failure.toString())
     }
     is WirelessEndReason.Failed -> if (reason.step == SessionStep.BLUETOOTH && isListenFailure(reason.detail)) {

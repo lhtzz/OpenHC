@@ -9,6 +9,8 @@ import android.util.Log
 import io.github.gcbond.openhc.IdentityLoader
 import io.github.gcbond.openhc.OpenHcApp
 import io.github.gcbond.openhc.platform.net.VpnConsent
+import io.github.gcbond.openhc.platform.wifi.LegacyHotspot
+import io.github.gcbond.openhc.settings.WirelessPreferences
 import io.github.gcbond.openhc.wireless.WirelessNetworkPlan
 import io.github.gcbond.openhc.wireless.WirelessUiState
 
@@ -41,7 +43,9 @@ internal class SilentBootWatch(
             identityLoaded = IdentityLoader.load(app) is IdentityLoader.Result.Loaded,
             vpnGranted = VpnConsent.isGranted(app),
             wirelessPermissionsGranted = BootStart.wirelessPermissionsGranted(app),
-            hotspotSupported = WirelessNetworkPlan.hotspotSupported(Build.VERSION.SDK_INT),
+            hotspotSupported = WirelessNetworkPlan.hotspotSupported(
+                Build.VERSION.SDK_INT, WirelessPreferences(app).carHotspot, LegacyHotspot::available,
+            ),
         )
         Log.i(BootStart.TAG, "收到开机广播（$kind），开机静默连接开着：$route，安卓 API ${Build.VERSION.SDK_INT}")
         if (route.opensUi) return openUi("后台等待缺前提（$route）")

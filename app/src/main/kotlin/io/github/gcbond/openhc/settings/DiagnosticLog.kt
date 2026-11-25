@@ -18,7 +18,7 @@ import java.util.Locale
  * 这个目录别的应用和车机的文件管理器都进不去，所以界面上另有「导出 / 分享」把它复制出来（见 LogExport）。
  * 文件固定一个，超过上限就丢掉前面一半，避免占满车机存储。
  *
- * 只记协议和音频的关键节点（连上、协商结果、建播放器、放不了、断开原因），不记画面内容和密钥。
+ * 只记连接、协议和音频的关键节点（USB、协商、播放器、断开原因），不记画面内容和密钥。
  */
 object DiagnosticLog {
     /** logcat 里用的标签；文件里每行也带上它，方便对照。 */
@@ -55,7 +55,7 @@ object DiagnosticLog {
     fun location(): String = synchronized(lock) { file?.absolutePath } ?: "没有可写的日志目录"
 
     /** 导出时用的文件名：带导出时间，多次导出不会互相覆盖。 */
-    fun exportName(): String = "openhc-diagnostic-${nameFormat.format(Date())}.log"
+    fun exportName(): String = synchronized(lock) { "openhc-diagnostic-${nameFormat.format(Date())}.log" }
 
     /**
      * 记一条。`tag` 用 `OpenHC-Audio`、`OpenHC-Wireless` 这类原有标签，文件里能看出是哪一层的。
@@ -63,11 +63,11 @@ object DiagnosticLog {
      */
     fun log(tag: String, message: String) {
         Log.i(tag, message)
-        val target = synchronized(lock) { file } ?: return
-        val line = "${timeFormat.format(Date())} $tag/$message\n"
         try {
             synchronized(lock) {
+                val target = file ?: return
                 if (target.length() > MAX_BYTES) trim(target)
+                val line = "${timeFormat.format(Date())} $tag/$message\n"
                 target.appendText(line, Charsets.UTF_8)
             }
         } catch (e: RuntimeException) {
@@ -77,21 +77,22 @@ object DiagnosticLog {
         }
     }
 
-    /** 清空日志（设置页「清空日志」用）。 */
-    fun clear() {
-        val target = synchronized(lock) { file } ?: return
+    /** 只清本应用的连接日志；与 append 共用锁。未初始化、无法删除时返回 false。 */
+    fun clear(): Boolean = synchronized(lock) {
+        val target = file ?: return@synchronized false
         try {
-            target.delete()
+            clearConnectionLogFile(target)
         } catch (e: RuntimeException) {
             Log.w(TAG, "清空诊断日志失败：${e.javaClass.simpleName}")
+            false
         }
     }
 
     /** 读出全部内容；没有日志时返回提示文字。 */
-    fun read(): String {
-        val target = synchronized(lock) { file } ?: return "没有可用的日志文件"
-        return try {
-            if (!target.exists()) "日志还是空的（这次启动后还没有连接过）" else target.readText(Charsets.UTF_8)
+    fun read(): String = synchronized(lock) {
+        val target = file ?: return@synchronized "没有可用的日志文件"
+        try {
+            if (!target.exists()) "暂无连接日志，之后的连接仍会记录。" else target.readText(Charsets.UTF_8)
         } catch (e: RuntimeException) {
             "读日志失败：${e.javaClass.simpleName}"
         } catch (e: IOException) {
@@ -100,9 +101,9 @@ object DiagnosticLog {
     }
 
     /** 日志全文；没有日志时是空串。导出、分享都从这里取，复制而不是移动，导完日志继续写。 */
-    fun snapshot(): String {
-        val target = synchronized(lock) { file } ?: return ""
-        return try {
+    fun snapshot(): String = synchronized(lock) {
+        val target = file ?: return@synchronized ""
+        try {
             if (target.exists()) target.readText(Charsets.UTF_8) else ""
         } catch (e: IOException) {
             ""
@@ -125,3 +126,7 @@ object DiagnosticLog {
         target.writeBytes(all.copyOfRange(start, all.size))
     }
 }
+
+/** 只清选定的普通文件；已经没有日志也算成功，不能删除目录或清理其它文件。 */
+internal fun clearConnectionLogFile(target: File): Boolean =
+    !target.exists() || (target.isFile && target.delete())

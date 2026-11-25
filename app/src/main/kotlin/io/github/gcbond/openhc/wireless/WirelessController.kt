@@ -50,6 +50,7 @@ import io.github.gcbond.openhc.platform.wifi.LocalHotspotOwner
 import io.github.gcbond.openhc.platform.wifi.CarHotspot
 import io.github.gcbond.openhc.platform.wifi.CarHotspotSettings
 import io.github.gcbond.openhc.platform.wifi.MacText
+import io.github.gcbond.openhc.platform.wifi.LegacyHotspot
 import io.github.gcbond.openhc.platform.wifi.WifiStatus
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
@@ -95,7 +96,7 @@ import kotlin.concurrent.thread
  * 用户点「开始无线连接」是扫码连接（新手机配对，配对过的手机扫码免输码）。被动等手机回连（「等已配对的手机回连」、BLE 广播）
  * 已不再自动进入，相关代码待删。
  *
- * WiFi（规则在 [WirelessNetworkPlan]）：车机开本地热点（[LocalHotspotOwner]，安卓 8.0 起才有，更早的车机用不了无线）。
+ * WiFi（规则在 [WirelessNetworkPlan]）：由 [LocalHotspotOwner] 开热点，或使用已配置的车机自带热点。
  * 有连接在进行时就先把热点开好留着（车机主动回连要等车机连上手机的蓝牙控制通道之后才开，手机不在时不碰车机 WiFi），
  * 手机认证通过后直接用；连接结束就关（[syncHotspotStandby]），这期间车机自己的 WiFi 会被热点顶掉。
  * 「退出后恢复车机 WiFi」开着时，热点关掉后由 [wifiRestore] 把车机 WiFi 开回来（安卓 10 起改为提示车主）。
@@ -451,9 +452,8 @@ class WirelessController(
         userStopped = false
         if (wirelessPrefs.wiredOnly) return blocked(kind, WirelessNotice.WiredOnly, AutoHold.WIRED_ONLY)
         if (wiredActive()) return blocked(kind, WirelessNotice.WiredActive, AutoHold.WIRED_ACTIVE)
-        // 热点接口：安卓 8.0 起用系统的本地热点，更早的用隐藏的 setWifiApEnabled（见 WirelessNetworkPlan）。
-        // 不要求车机 WiFi 开着：开热点时单射频车机自己的 WiFi 本来就会断。
-        if (!WirelessNetworkPlan.hotspotSupported(Build.VERSION.SDK_INT)) {
+        // 车机自带热点由车主开启，不依赖本应用调用隐藏的 setWifiApEnabled。
+        if (!hotspotSupported(Build.VERSION.SDK_INT)) {
             return blocked(kind, WirelessNotice.HotspotUnsupported, AutoHold.HOTSPOT_UNSUPPORTED)
         }
         val identity = when (val loaded = IdentityLoader.load(app)) {
@@ -461,6 +461,11 @@ class WirelessController(
             IdentityLoader.Result.Missing -> return blocked(kind, WirelessNotice.IdentityMissing, AutoHold.IDENTITY_MISSING)
             is IdentityLoader.Result.Invalid ->
                 return blocked(kind, WirelessNotice.IdentityInvalid(loaded.reason), AutoHold.IDENTITY_MISSING)
+        }
+        val adapter = BluetoothStatus.adapter(app)
+            ?: return blocked(kind, WirelessNotice.BluetoothUnsupported, AutoHold.BLUETOOTH_OFF)
+        if (BluetoothStatus.state(adapter) != BluetoothStatus.State.ON) {
+            return blocked(kind, WirelessNotice.BluetoothOff, AutoHold.BLUETOOTH_OFF)
         }
         // 二维码、握手、认证里的车机身份都由它推出，必须是真实地址：读不到就只能让车主填。
         val systemAddress = DeviceInfo.systemBluetoothAddress(app)
@@ -475,11 +480,6 @@ class WirelessController(
         val addressMismatch = bluetooth.source == BluetoothSource.MANUAL && BluetoothAddressPolicy.isLocallyAdministered(address)
         if (addressMismatch) {
             Log.w(TAG, "用的是手填的蓝牙地址；它像是编出来的地址，不是车机真实地址时扫码后不会有反应")
-        }
-        val adapter = BluetoothStatus.adapter(app)
-            ?: return blocked(kind, WirelessNotice.BluetoothUnsupported, AutoHold.BLUETOOTH_OFF)
-        if (BluetoothStatus.state(adapter) != BluetoothStatus.State.ON) {
-            return blocked(kind, WirelessNotice.BluetoothOff, AutoHold.BLUETOOTH_OFF)
         }
         val wifi = WifiStatus.read(app)
         val missing = WirelessPermissions.missing(Build.VERSION.SDK_INT) { granted(it) }
@@ -577,7 +577,7 @@ class WirelessController(
 
     /** 开始不了：回到空闲，显示原因。 */
     private fun block(notice: WirelessNotice) {
-        Log.w(TAG, "无线连接不能开始：$notice")
+        DiagnosticLog.log(TAG, "无线连接不能开始（安卓 API ${Build.VERSION.SDK_INT}）：$notice")
         apply(WirelessSignal.Blocked(notice))
         releaseForeground()
     }
@@ -595,7 +595,8 @@ class WirelessController(
      * 车机主动回连也不用。还要有广播权限、车机支持。不发返回 null。
      */
     private fun beaconPlan(kind: Kind, adapter: BluetoothAdapter): ReconnectBeacon.Options? {
-        if (kind != Kind.AUTO) return null
+        // 经典蓝牙扫码不依赖 BLE；老系统也不加载 API 21 才有的广告组件。
+        if (kind != Kind.AUTO || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return null
         val missing = WirelessPermissions.advertise(Build.VERSION.SDK_INT).filterNot { granted(it) }
         if (missing.isNotEmpty()) {
             Log.i(TAG, "没有蓝牙广播权限，这次不发广播（${if (kind == Kind.AUTO) "不进入等待" else "只能扫码"}）")
@@ -819,7 +820,7 @@ class WirelessController(
             enabled = forDial || wirelessPrefs.connectOnBluetooth,
             wiredOnly = wirelessPrefs.wiredOnly,
             wiredActive = !forDial && wiredActive(),
-            hotspotSupported = WirelessNetworkPlan.hotspotSupported(sdk),
+            hotspotSupported = hotspotSupported(sdk),
             identityLoaded = IdentityLoader.load(app) is IdentityLoader.Result.Loaded,
             bluetoothAddressKnown = address != null,
             bluetoothOn = BluetoothStatus.state(adapter) == BluetoothStatus.State.ON,
@@ -828,6 +829,9 @@ class WirelessController(
             overlayGranted = forDial || overlayGranted(),
         )
     }
+
+    private fun hotspotSupported(sdk: Int): Boolean =
+        WirelessNetworkPlan.hotspotSupported(sdk, wirelessPrefs.carHotspot, LegacyHotspot::available)
 
     private fun cancelAutoRetry() {
         val retry = autoRetry ?: return

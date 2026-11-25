@@ -19,10 +19,11 @@ import io.github.gcbond.openhc.platform.media.TouchMapper
 import io.github.gcbond.openhc.platform.media.VideoDecoder
 import io.github.gcbond.openhc.platform.media.VideoViewport
 import io.github.gcbond.openhc.platform.media.onMotionEvent
+import io.github.gcbond.openhc.settings.DiagnosticLog
 
 /**
  * 投屏视图：按视频宽高比显示解码出来的手机画面（居中、黑边），把触摸换算成发给手机的 [HiSightInput]。
- * 显示期间保持屏幕常亮，挂到窗口上时（[immersive] 为 true）藏起状态栏和底部导航栏。
+ * [setPresenting] 切换输入、常亮和系统栏。显示首页/设置时保留已挂载的画布，不中断解码。
  *
  * 画面用 [SurfaceView] 显示，不用 TextureView：
  * - 解码器的输出直接作为独立图层交给系统合成，不经过本应用的界面绘制，少一次 GPU 拷贝、少一到两帧延迟，
@@ -30,11 +31,12 @@ import io.github.gcbond.openhc.platform.media.onMotionEvent
  * - [VideoDecoder] 按屏幕刷新的节拍送显（同一次刷新最多一帧新画面），时间戳总在过去，帧不会在合成器里越积越多；
  *   节拍按视图所在屏幕的刷新时序算，Surface 交给解码器时一并给它（[DisplayRefreshRate.timingOf]）；
  * - 性能弱的车机上更省电、更不容易掉帧。
- * 代价是 Surface 在切后台时会被销毁，[VideoDecoder] 为此会把输出临时切到占位 Surface、继续解码，回来时再切回。
+ * 真正离开 Activity 时 Surface 仍可能被销毁，交给 [VideoDecoder] 处理；同一 Activity 内切页不主动销毁。
  *
  * 用法：
  * ```
  * view.attachDecoder(decoder)                 // Surface 变化时同步交给解码器
+ * view.setPresenting(true)                    // 前台接收触摸、进入全屏
  * view.onInput = { input -> 发给手机 }         // 主线程回调
  * // 解码器的 onVideoSizeChanged 里：
  * view.setVideoSize(width, height)            // 任意线程
@@ -50,17 +52,22 @@ class ProjectionView @JvmOverloads constructor(
         fun onSurfaceChanged(surface: Surface?)
     }
 
-    /** 换算好的触摸事件，在主线程上依次回调；没设置时触摸照常跟踪但不发出。 */
+    /** 换算好的触摸事件：只在投屏页前台跟踪，在主线程上依次回调。 */
     var onInput: ((HiSightInput) -> Unit)? = null
 
-    /** 挂到窗口上时是否藏起状态栏和导航栏（离开窗口时恢复）。 */
-    var immersive: Boolean = true
-        set(value) {
-            if (field == value) return
-            field = value
-            if (!io.github.gcbond.openhc.compat.Compat.isAttached(this)) return
-            if (value) hideSystemBars() else restoreSystemBars()
-        }
+    private var presenting = false
+
+    /** 同一窗口内遮住或露出画布：不改 SurfaceView 的可见性，也不解绑解码器。 */
+    fun setPresenting(value: Boolean) {
+        if (presenting == value) return
+        if (!value) releaseTouches()
+        presenting = value
+        keepScreenOn = value
+        if (value && io.github.gcbond.openhc.compat.Compat.isAttached(this)) hideSystemBars()
+        else restoreSystemBars()
+        val ready = surface?.isValid == true
+        DiagnosticLog.log(LOG_TAG, "${if (value) "显示" else "暂离"}投屏页：画布有效=$ready")
+    }
 
     private val surfaceView = SurfaceView(context)
     private val touchMapper = TouchMapper(edgeSlopPx = EDGE_SLOP_DP * resources.displayMetrics.density)
@@ -73,7 +80,6 @@ class ProjectionView @JvmOverloads constructor(
 
     init {
         setBackgroundColor(Color.BLACK)
-        keepScreenOn = true
         addView(surfaceView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) = updateSurface(holder.surface)
@@ -152,13 +158,14 @@ class ProjectionView @JvmOverloads constructor(
     // 触摸原样转给手机，本地没有点击动作，无障碍的 performClick 没有意义。
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!presenting) return false
         deliver(touchMapper.onMotionEvent(event))
         return true
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        if (immersive) hideSystemBars()
+        if (presenting) hideSystemBars()
     }
 
     override fun onDetachedFromWindow() {
@@ -171,7 +178,7 @@ class ProjectionView @JvmOverloads constructor(
         super.onWindowFocusChanged(hasWindowFocus)
         if (hasWindowFocus) {
             // 弹框、下拉通知栏之后系统可能把栏放出来，拿回焦点时再藏一次。
-            if (immersive) hideSystemBars()
+            if (presenting) hideSystemBars()
         } else {
             releaseTouches()
         }
@@ -182,6 +189,7 @@ class ProjectionView @JvmOverloads constructor(
         if (newSurface === surface) return
         surface = newSurface
         surfaceListener?.onSurfaceChanged(newSurface)
+        DiagnosticLog.log(LOG_TAG, "画布${if (newSurface == null) "销毁" else "创建"}：投屏页前台=$presenting")
     }
 
     private fun replaceSurfaceListener(listener: SurfaceListener?) {
@@ -203,12 +211,12 @@ class ProjectionView @JvmOverloads constructor(
         for (touch in touches) listener(touch)
     }
 
-    /** 「全屏显示」：false 时只藏状态栏、保留底部导航栏（见 [SystemBars.hide]）。在 [immersive] 之前设。 */
+    /** 「全屏显示」：false 时保留上下栏（见 [SystemBars.applyProjectionMode]）。在 [setPresenting] 之前设。 */
     var fullScreen: Boolean = true
 
     private fun hideSystemBars() {
         val window = hostWindow() ?: return
-        SystemBars.hide(window, this, fullScreen)
+        SystemBars.applyProjectionMode(window, this, fullScreen)
         barsHidden = true
     }
 
@@ -229,6 +237,8 @@ class ProjectionView @JvmOverloads constructor(
     }
 
     private companion object {
+        const val LOG_TAG = "OpenHC-Projection"
+
         /** 按下点在黑边里、离画面边缘不超过这个距离时仍然接受（钳到边缘），方便从边缘滑入的手势。 */
         const val EDGE_SLOP_DP = 24f
     }

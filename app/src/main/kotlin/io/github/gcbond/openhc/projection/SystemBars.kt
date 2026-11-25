@@ -9,29 +9,23 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 
 /**
- * 投屏时的沉浸式全屏：状态栏和底部导航栏都藏起来，内容铺到整块屏幕。
- *
- * 车机上只藏状态栏是不够的：导航栏还占着屏幕底部，画面就少一块（实测）。从屏幕边缘划一下栏会临时出现，
- * 过一会儿自己收回。安卓 11 起用 WindowInsetsController，更早的系统由 androidx 换成 systemUiVisibility 的
- * 全屏、隐藏导航栏和粘性沉浸标志，效果相同。
+ * 让 Android 管理状态栏和导航栏，不请求把窗口内容强行画到可见栏后面。
+ * 全屏只是请求隐藏：老车机 ROM 不一定允许，剩余可见区域由 [ProjectionFrame] 再检查。
  */
 internal object SystemBars {
     private val BARS = WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars()
 
-    /**
-     * [fullScreen] 为 false 时只藏状态栏、保留底部导航栏，内容不画到导航栏下面（画面让出它的位置）。
-     */
-    fun hide(window: Window, view: View, fullScreen: Boolean = true) {
+    /** 关闭全屏时保留两边系统栏；开启时只尝试隐藏，不使用 LAYOUT_FULLSCREEN。 */
+    fun applyProjectionMode(window: Window, view: View, fullScreen: Boolean) {
         if (!fullScreen) {
-            WindowCompat.setDecorFitsSystemWindows(window, true)
-            WindowCompat.getInsetsController(window, view).apply {
-                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                hide(WindowInsetsCompat.Type.statusBars())
-                show(WindowInsetsCompat.Type.navigationBars())
-            }
+            show(window, view)
             return
         }
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        // 安卓 4.1～4.3 没有真正的沉浸式模式，额外走旧窗口全屏标志隐藏普通状态栏。
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.KITKAT) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        }
         // 安卓 9 起：屏幕有挖孔时内容也铺到挖孔两侧的短边上（车机屏一般没有挖孔，这里只是不留黑边）。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val attributes = window.attributes
@@ -47,6 +41,7 @@ internal object SystemBars {
     }
 
     fun show(window: Window, view: View) {
+        window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         WindowCompat.getInsetsController(window, view).show(BARS)
         WindowCompat.setDecorFitsSystemWindows(window, true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {

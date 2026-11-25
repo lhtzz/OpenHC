@@ -67,6 +67,33 @@ class RoundTripTest {
     }
 
     @Test
+    fun twoInstallationsWithSameCarIdCanCausePeer17UntilPhonePairsWithTheCorrectOne() {
+        // 同一线上车机 ID，但两个独立安装（三方包、测试包）各自生成长期身份。
+        val firstApp = InMemoryTrustStore()
+        val secondApp = InMemoryTrustStore()
+        val phone = TestPhone.Store()
+        assertEquals(listOf(2, 3, 0), pair(firstApp, phone).car.resultCodes())
+        val pairedKey = firstApp.snapshot().identities.single().publicKey
+        val firstBefore = TrustStoreCodec.encode(firstApp.snapshot())
+        assertEquals(listOf(2, 3, 0), pair(secondApp, phone).car.resultCodes())
+        assertFalse(pairedKey.contentEquals(phone.carPublicKey!!))
+
+        val failed = sts(firstApp, phone)
+        val reason = assertIs<AuthFailure.Peer>(assertIs<AccessoryAction.Failed>(failed.car.last()).failure)
+        assertEquals(HcError.VERIFY_PROOF_FAILED.code, reason.errorCode)
+        assertTrue(reason.afterStsStartResponse)
+        assertEquals(1, failed.car.sent().size, "车机只发了 STS 开始应答，没收到签名确认")
+        assertFalse(failed.phone.succeeded)
+        assertContentEquals(firstBefore, TrustStoreCodec.encode(firstApp.snapshot()))
+
+        // 用户在手机侧重新完成 PIN 配对：车机自己的长期身份不用删除或重建。
+        assertEquals(listOf(2, 3, 0), pair(firstApp, phone).car.resultCodes())
+        assertContentEquals(pairedKey, phone.carPublicKey)
+        val reconnected = sts(firstApp, phone)
+        assertContentEquals(reconnected.phone.sessionKey, reconnected.carKey())
+    }
+
+    @Test
     fun wrongPinFailsOnBothSidesWithoutTouchingStore() {
         val store = InMemoryTrustStore()
         val outcome = pair(store, carPin = "000001", phonePin = "000002")
@@ -94,6 +121,26 @@ class RoundTripTest {
         assertEquals(HcError.VERIFY_PROOF_FAILED, stale.localError())
         val fresh = sts(store, newPhone)
         assertContentEquals(fresh.phone.sessionKey, fresh.carKey())
+    }
+
+    @Test
+    fun newCarIdCannotBorrowPhoneTrustToSignStsWithAFreshKey() {
+        val store = InMemoryTrustStore()
+        val phoneStore = TestPhone.Store()
+        pair(store, phoneStore)
+        val before = TrustStoreCodec.encode(store.snapshot())
+        val randomSource = SequenceRandom("unpaired-car-id")
+        val changedId = "DIFFERENT-CAR-ID"
+        val config = AccessoryAuthConfig(Synthetic.SERVICE, changedId, Synthetic.PHONE_ID, null)
+        val car = KotlinAccessoryAuthenticator(config, store, randomSource)
+        assertTrue(car.peerTrusted)
+        assertFalse(car.hasStoredLocalIdentity)
+        val phone = TestPhone(Synthetic.SERVICE, Synthetic.PHONE_ID, changedId, null, random, phoneStore)
+        val outcome = converse(car, phone, phone.startSts())
+        assertEquals(HcError.SERVICE_CONFIRM_ERROR, outcome.localError())
+        assertEquals(HcError.SERVICE_CONFIRM_ERROR.code, phone.failedWith)
+        assertEquals(0, randomSource.drawn, "没有原车机密钥时不得生成密钥或发 0x8011")
+        assertContentEquals(before, TrustStoreCodec.encode(store.snapshot()))
     }
 
     @Test
@@ -162,7 +209,9 @@ class RoundTripTest {
 
         val car2 = KotlinAccessoryAuthenticator(carConfig(Synthetic.PIN), store, random)
         val peerFailure = car2.onMessage("{\"message\":32896,\"payload\":{\"errorCode\":12}}")
-        assertEquals(12, assertIs<AuthFailure.Peer>(assertIs<AccessoryAction.Failed>(peerFailure.single()).failure).errorCode)
+        val reason = assertIs<AuthFailure.Peer>(assertIs<AccessoryAction.Failed>(peerFailure.single()).failure)
+        assertEquals(12, reason.errorCode)
+        assertFalse(reason.afterStsStartResponse)
         assertTrue(car2.isFinished)
         assertEquals(emptyList(), car2.onMessage("{\"message\":1,\"payload\":{}}"))
 

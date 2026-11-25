@@ -42,7 +42,7 @@ enum class Phase {
     STOPPING,
 
     /**
-     * 这次插入已经用过（发过 carInfo），手机不会再理车机：要拔线等 5 秒以上再插。
+     * 上次已发 carInfo：为避免手机重新枚举时误触发连接，要拔线等 5 秒以上再插。
      * 手机拔下够久之后自动开始下一次连接（回到 [WAITING_FOR_PHONE]）。
      */
     REPLUG_REQUIRED,
@@ -279,7 +279,7 @@ object ConnectionReducer {
             is SessionEvent.AuthStarted -> if (event.mode == AuthMode.PIN_PAIRING) {
                 state.copy(phase = Phase.PAIRING, step = null)
             } else {
-                state.copy(phase = Phase.CONNECTING, step = Step.AUTHENTICATING)
+                state.copy(phase = Phase.CONNECTING, step = Step.AUTHENTICATING, pinCode = null)
             }
             is SessionEvent.ShowPinCode -> state.copy(phase = Phase.PAIRING, step = null, pinCode = event.pinCode)
             is SessionEvent.Authenticated ->

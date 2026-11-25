@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import io.github.gcbond.openhc.connection.ConnectionController
 import io.github.gcbond.openhc.connection.Phase
+import io.github.gcbond.openhc.settings.CrashDiagnosticLog
 import io.github.gcbond.openhc.settings.DiagnosticLog
 import io.github.gcbond.openhc.startup.BootStart
 import io.github.gcbond.openhc.startup.ProjectionSurfacer
@@ -56,6 +57,7 @@ class OpenHcApp : Application() {
         super.onCreate()
         // 诊断日志要尽早初始化：后面各层的连接日志都往这个文件里写。
         DiagnosticLog.init(this)
+        CrashDiagnosticLog.install(this, BuildConfig.VERSION_NAME)
         registerActivityLifecycleCallbacks(uiVisibility)
         // 有线开始时无线让出等回连，有线结束后无线再回到等待。
         connection.addHostListener {

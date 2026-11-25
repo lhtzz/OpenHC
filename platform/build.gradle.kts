@@ -7,6 +7,12 @@ plugins {
 android {
     namespace = "io.github.gcbond.openhc.platform"
     compileSdk = libs.versions.compileSdk.get().toInt()
+    // r23c 仍能为 Android 4.1（API 16）构建 32 位库；新 NDK 已去掉 Jelly Bean 支持。
+    ndkVersion = "23.2.8568313"
+
+    externalNativeBuild {
+        ndkBuild { path = file("src/main/jni/Android.mk") }
+    }
 
     defaultConfig {
         minSdk = libs.versions.minSdk.get().toInt()

@@ -14,8 +14,11 @@ import io.github.gcbond.openhc.core.common.identity.AuthServiceIdentity
  * 实现不做任何 I/O，不开线程，也不持有连接。
  */
 interface AccessoryAuthenticator {
-    /** 本机是否已有这台手机的长期信任记录（决定能否免码回连）。创建时确定。 */
+    /** 本机是否已有这台手机的长期信任记录。创建时确定。 */
     val peerTrusted: Boolean
+
+    /** 当前车机认证身份是否有配对时写入的长期密钥。临时生成的身份不算。 */
+    val hasStoredLocalIdentity: Boolean
 
     /** 是否已经得出结果（成功或失败）。 */
     val isFinished: Boolean
@@ -113,13 +116,22 @@ sealed class AuthFailure {
     }
 
     /** 手机发来 0x8080 错误通知，[errorCode] 原样保留。按协议不回包。 */
-    class Peer(val errorCode: Int) : AuthFailure() {
+    class Peer(
+        val errorCode: Int,
+        /** 已回应 STS 开始请求，仍在等手机的认证确认。 */
+        val afterStsStartResponse: Boolean = false,
+    ) : AuthFailure() {
         override fun toString(): String = "Peer($errorCode)"
     }
 
     /** 手机要求免码回连，但本机没有它的长期信任记录。 */
     object NotTrusted : AuthFailure() {
         override fun toString(): String = "NotTrusted"
+    }
+
+    /** 存有手机的信任记录，但当前车机标识没有与配对时对应的本机长期密钥。 */
+    object MissingLocalIdentity : AuthFailure() {
+        override fun toString(): String = "MissingLocalIdentity"
     }
 
     /** 握手声明的连接方式（`usb_connection`）和本会话的配置不一致：有线会话收到无线握手，或反过来。 */

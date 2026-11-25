@@ -1,18 +1,20 @@
 package io.github.gcbond.openhc.core.auth.crypto
 
+import org.bouncycastle.crypto.InvalidCipherTextException
+import org.bouncycastle.crypto.engines.AESEngine
+import org.bouncycastle.crypto.modes.GCMBlockCipher
+import org.bouncycastle.crypto.params.AEADParameters
+import org.bouncycastle.crypto.params.KeyParameter
 import org.bouncycastle.math.ec.rfc7748.X25519
 import org.bouncycastle.math.ec.rfc8032.Ed25519
 import java.math.BigInteger
-import java.security.GeneralSecurityException
 import java.security.MessageDigest
-import javax.crypto.Cipher
 import javax.crypto.Mac
-import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /*
- * 认证用到的密码原语。散列、HMAC、AES-GCM 和模幂走 JDK（安卓 6.0 都有）；
- * X25519、Ed25519 走 BouncyCastle 的轻量级 API（老安卓的 JDK 没有这两种曲线，也不注册 JCA Provider）。
+ * 认证用到的密码原语。散列、HMAC 和模幂走 JDK；AES-GCM、X25519、Ed25519 走 BouncyCastle 的轻量级 API。
+ * 安卓 4.1～4.3 没有 GCMParameterSpec；不依赖系统的 AES/GCM 提供者，也不注册 JCA Provider。
  */
 
 internal object Sha256 {
@@ -59,25 +61,35 @@ internal object Hkdf {
 internal object AesGcm {
     const val TAG_LENGTH = 16
 
-    fun encrypt(key: ByteArray, nonce: ByteArray, aad: ByteArray, plain: ByteArray): ByteArray {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(TAG_LENGTH * 8, nonce))
-        if (aad.isNotEmpty()) cipher.updateAAD(aad)
-        return cipher.doFinal(plain)
-    }
+    fun encrypt(key: ByteArray, nonce: ByteArray, aad: ByteArray, plain: ByteArray): ByteArray =
+        transform(true, key, nonce, aad, plain)
 
     /** 解密并校验标签；标签不对或参数非法返回 null。 */
     fun decrypt(key: ByteArray, nonce: ByteArray, aad: ByteArray, cipherAndTag: ByteArray): ByteArray? {
         if (key.size != 16 && key.size != 24 && key.size != 32) return null
         if (nonce.isEmpty() || cipherAndTag.size < TAG_LENGTH) return null
         return try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(TAG_LENGTH * 8, nonce))
-            if (aad.isNotEmpty()) cipher.updateAAD(aad)
-            cipher.doFinal(cipherAndTag)
-        } catch (e: GeneralSecurityException) {
+            transform(false, key, nonce, aad, cipherAndTag)
+        } catch (_: InvalidCipherTextException) {
+            null
+        } catch (_: IllegalArgumentException) {
             null
         }
+    }
+
+    private fun transform(encrypting: Boolean, key: ByteArray, nonce: ByteArray, aad: ByteArray, input: ByteArray): ByteArray {
+        val cipher = GCMBlockCipher.newInstance(AESEngine.newInstance())
+        cipher.init(encrypting, AEADParameters(KeyParameter(key), TAG_LENGTH * 8, nonce, aad))
+        val output = ByteArray(cipher.getOutputSize(input.size))
+        val written = try {
+            val partial = cipher.processBytes(input, 0, input.size, output, 0)
+            partial + cipher.doFinal(output, partial)
+        } catch (e: InvalidCipherTextException) {
+            // 不把标签校验失败时暂存在输出缓冲里的明文返回给调用者。
+            output.fill(0)
+            throw e
+        }
+        return if (written == output.size) output else output.copyOf(written)
     }
 }
 

@@ -571,11 +571,17 @@ class SocketRunner(
 
         fun describe(e: Throwable): String = e.javaClass.simpleName + (e.message?.let { "：$it" } ?: "")
 
-        fun closeQuietly(closeable: Closeable) {
+        // 在 Android API 16～18 上，Socket/ServerSocket 有 close()，但还不实现 Closeable。
+        // 保留具体类型，避免旧 Dalvik 在关闭手机连接时做不成立的接口转换。
+        fun closeQuietly(socket: Socket) = closeTcp { socket.close() }
+
+        fun closeQuietly(server: ServerSocket) = closeTcp { server.close() }
+
+        private inline fun closeTcp(close: () -> Unit) {
             try {
-                closeable.close()
-            } catch (e: IOException) {
-                // 关闭时的错误没有意义。
+                close()
+            } catch (_: IOException) {
+                // 套接字已经失效时仍继续关闭其他资源。
             }
         }
 

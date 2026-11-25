@@ -84,18 +84,6 @@ class WifiRestorePolicyTest {
     }
 
     @Test
-    fun hotspotNeedsAndroid8() {
-        assertEquals(true, WirelessNetworkPlan.hotspotSupported(26))
-        assertEquals(true, WirelessNetworkPlan.hotspotSupported(36))
-        // 安卓 8.0 以下退回旧的 setWifiApEnabled（普通个人热点），照样能开：见 WirelessNetworkPlanTest。
-        assertEquals(true, WirelessNetworkPlan.hotspotSupported(25))
-        assertEquals(true, WirelessNetworkPlan.hotspotSupported(23))
-        // 安卓 4.1（API 16）起放行，能不能开交给运行时反射探测。
-        assertEquals(true, WirelessNetworkPlan.hotspotSupported(19))
-        assertEquals(true, WirelessNetworkPlan.hotspotSupported(16))
-    }
-
-    @Test
     fun hotspotGetsMoreTimeToStart() {
         val hotspot = WirelessNetworkPlan.timeouts()
         val defaults = WirelessTimeouts()

@@ -98,9 +98,8 @@ class FileTrustStore private constructor(
          * 原子写：先写同目录下的临时文件并刷到磁盘，再改名覆盖目标（同一文件系统内的 rename 是原子的）。
          * 中途失败时目标文件保持原样，临时文件删掉。java.io 打不开目录，改名后没法再刷目录项，这一步省掉。
          *
-         * 注意 `File.renameTo` 在 Windows 上不能覆盖已存在的目标（POSIX 可以），所以第一次改名失败、
-         * 且目标确实存在时，先删掉旧文件再改名。安卓上是 POSIX 语义，走不到那条分支；
-         * 这条分支是给在 Windows 上跑单元测试用的，删旧文件那一下不是原子的，但测试场景够用。
+         * Windows JVM 的 File.renameTo 不覆盖目标，改用原子替换；Android 仍用同目录 POSIX rename。
+         * 两边都不能先删旧文件。若文件系统不支持原子替换，保留旧文件并按写入失败处理。
          */
         @Throws(IOException::class)
         internal fun writeAtomically(target: File, bytes: ByteArray) {
@@ -113,13 +112,33 @@ class FileTrustStore private constructor(
                     out.fd.sync()
                 }
                 if (!temp.renameTo(target)) {
-                    // Windows：目标已存在时 renameTo 会失败，先删掉再改名。
-                    if (target.exists() && target.delete() && temp.renameTo(target)) return
-                    throw IOException("把临时文件改名为 ${target.name} 失败")
+                    val windows = System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)
+                    if (!windows || !target.isFile) {
+                        throw IOException("把临时文件改名为 ${target.name} 失败")
+                    }
+                    replaceAtomicallyOnWindows(temp, target)
                 }
             } catch (e: IOException) {
                 temp.delete()
                 throw e
+            }
+        }
+
+        // java.nio.file 在 Android API 26 之前不存在，避免让旧 Dalvik 解析这些类型。
+        private fun replaceAtomicallyOnWindows(temp: File, target: File) {
+            try {
+                val path = Class.forName("java.nio.file.Path")
+                val option = Class.forName("java.nio.file.CopyOption")
+                val options = java.lang.reflect.Array.newInstance(option, 2)
+                val values = Class.forName("java.nio.file.StandardCopyOption").enumConstants
+                    .filterIsInstance<Enum<*>>().associateBy { it.name }
+                java.lang.reflect.Array.set(options, 0, values.getValue("ATOMIC_MOVE"))
+                java.lang.reflect.Array.set(options, 1, values.getValue("REPLACE_EXISTING"))
+                val toPath = File::class.java.getMethod("toPath")
+                Class.forName("java.nio.file.Files").getMethod("move", path, path, options.javaClass)
+                    .invoke(null, toPath.invoke(temp), toPath.invoke(target), options)
+            } catch (e: Exception) {
+                throw IOException("把临时文件改名为 ${target.name} 失败", e)
             }
         }
     }

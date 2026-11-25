@@ -117,6 +117,15 @@ class FileTrustStoreTest {
     }
 
     @Test
+    fun replacementDoesNotDeleteAnExistingDirectory() {
+        val target = File(dir, FileTrustStore.FILE_NAME)
+        assertTrue(target.mkdirs())
+        assertFailsWith<IOException> { FileTrustStore.writeAtomically(target, byteArrayOf(9)) }
+        assertTrue(target.isDirectory)
+        assertEquals(listOf(FileTrustStore.FILE_NAME), names())
+    }
+
+    @Test
     fun corruptFileIsAnErrorNotAnEmptyStore() {
         dir.mkdirs()
         File(dir, FileTrustStore.FILE_NAME).writeBytes(byteArrayOf(1, 2, 3))

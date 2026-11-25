@@ -11,7 +11,7 @@ object UsbDescriber {
             UsbInterfaceDescription(
                 index = i,
                 id = iface.id,
-                // getAlternateSetting 是 API 21 才有；低版本按 0 处理（只用于描述/日志）。
+                // API 21 以下这里只填占位值；真正的备用号在 openDevice 之后从原始描述符匹配。
                 alternateSetting = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
                     iface.alternateSetting
                 } else {

@@ -17,7 +17,7 @@ import java.util.BitSet
  * （车机没有联网时手机也上不了网，这一点和安卓 8.0 的本地热点不同）。
  *
  * 权限（AOSP 源码核实）：
- * - 安卓 4.0～5.1：`CHANGE_WIFI_STATE`（安装即授予）就够；这几个版本的 `WifiService.setWifiApEnabled` 只 `enforceChangePermission`；
+ * - 安卓 4.1～5.1：原生系统要求 `CHANGE_WIFI_STATE`（安装即授予），车机 ROM 可能有额外限制；
  * - 安卓 6.0～7.1：`WifiServiceImpl.setWifiApEnabled` 还会调 `ConnectivityManager.enforceTetherChangePermission`，
  *   它要求 `WRITE_SETTINGS` 的 appop（用户在系统设置里授权，`Settings.ACTION_MANAGE_WRITE_SETTINGS`）。
  *
@@ -40,12 +40,8 @@ object LegacyHotspot {
     /** 这个系统版本走旧接口时还要不要用户去系统设置里授权 `WRITE_SETTINGS`（安卓 6.0 起要）。 */
     fun needsWriteSettings(sdkInt: Int): Boolean = sdkInt in Build.VERSION_CODES.M until Build.VERSION_CODES.O
 
-    /** 旧接口能不能用（反射找得到 `setWifiApEnabled`）。找不到时无线连接只能用新接口。 */
-    fun available(): Boolean = try {
-        setApMethod() != null
-    } catch (e: RuntimeException) {
-        false
-    }
+    /** 是否找到开关及读状态方法；实际调用仍可能被 ROM 拒绝。 */
+    fun available(): Boolean = setApMethod() != null && apStateMethod() != null
 
     /**
      * 生成一份热点配置：WPA2-PSK、2.4 GHz、由系统挑信道。
@@ -108,8 +104,7 @@ object LegacyHotspot {
 
     /** 热点现在的状态（[WifiManager.WIFI_AP_STATE_ENABLED] 等）；读不到返回 -1。 */
     fun state(manager: WifiManager): Int = try {
-        val method = WifiManager::class.java.getMethod("getWifiApState")
-        method.invoke(manager) as? Int ?: -1
+        apStateMethod()?.invoke(manager) as? Int ?: -1
     } catch (e: Exception) {
         -1
     } catch (e: RuntimeException) {
@@ -129,6 +124,14 @@ object LegacyHotspot {
     /** 反射拿 `setWifiApEnabled(WifiConfiguration, boolean)`；拿不到返回 null。 */
     private fun setApMethod(): Method? = try {
         WifiManager::class.java.getMethod("setWifiApEnabled", WifiConfiguration::class.java, Boolean::class.javaPrimitiveType)
+    } catch (e: NoSuchMethodException) {
+        null
+    } catch (e: RuntimeException) {
+        null
+    }
+
+    private fun apStateMethod(): Method? = try {
+        WifiManager::class.java.getMethod("getWifiApState")
     } catch (e: NoSuchMethodException) {
         null
     } catch (e: RuntimeException) {

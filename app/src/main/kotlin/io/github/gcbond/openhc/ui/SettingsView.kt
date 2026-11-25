@@ -3,6 +3,7 @@ package io.github.gcbond.openhc.ui
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.DialogInterface
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -37,6 +38,8 @@ import io.github.gcbond.openhc.platform.net.VpnConsent
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
 import io.github.gcbond.openhc.settings.ClarityPreferences
+import io.github.gcbond.openhc.settings.CrashDiagnosticLog
+import io.github.gcbond.openhc.settings.DiagnosticLog
 import io.github.gcbond.openhc.settings.MediaKeyPreferences
 import io.github.gcbond.openhc.settings.PcmPhoneRecord
 import io.github.gcbond.openhc.settings.WirelessNetworkPreferences
@@ -432,7 +435,7 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         rebuild: () -> Unit,
     ): View {
         val savedManual = settings.manualBluetoothAddress
-        val current = BluetoothAddressPolicy.choose(systemBluetoothAddress, savedManual)
+        val current = settings.wiredBluetoothChoice(systemBluetoothAddress)
         val address = current.address
 
         val inner = context.column()
@@ -453,6 +456,7 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         val source = when (current.source) {
             BluetoothSource.SYSTEM_PROPERTY -> context.getString(R.string.settings_bt_current_property, address ?: "")
             BluetoothSource.MANUAL -> context.getString(R.string.settings_bt_current_manual, address ?: "")
+            BluetoothSource.WIRED_LOCAL -> context.getString(R.string.settings_bt_current_wired_local, address ?: "")
             BluetoothSource.UNAVAILABLE -> context.getString(R.string.settings_bt_current_unavailable)
         }
         inner.addView(context.textView(source + "\n" + context.getString(R.string.settings_bt_hint), sizeSp = 12f, color = Palette.Muted).apply {
@@ -503,6 +507,43 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         inner.addView(buttonRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             topMargin = context.dp(8f)
         })
+        if (BluetoothAddressPolicy.normalize(savedManual) != null) {
+            inner.addView(actionButton(context, context.getString(R.string.settings_bt_move_wired)) {
+                android.app.AlertDialog.Builder(context)
+                    .setTitle(R.string.settings_bt_move_wired)
+                    .setMessage(
+                        if (current.source == BluetoothSource.WIRED_LOCAL) R.string.settings_bt_replace_wired_confirm
+                        else R.string.settings_bt_move_wired_confirm,
+                    )
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        val moved = settings.useManualBluetoothForWiredOnly()
+                        Toast.makeText(
+                            context, if (moved) R.string.settings_bt_move_wired_done else R.string.settings_bt_move_wired_error,
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        if (moved) rebuild()
+                    }
+                    .show()
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = context.dp(8f)
+            })
+        }
+        if (current.source == BluetoothSource.WIRED_LOCAL) {
+            inner.addView(actionButton(context, context.getString(R.string.settings_bt_reset_wired)) {
+                android.app.AlertDialog.Builder(context)
+                    .setTitle(R.string.settings_bt_reset_wired)
+                    .setMessage(R.string.settings_bt_reset_wired_confirm)
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        if (settings.clearWiredLocalAddress()) rebuild()
+                        else Toast.makeText(context, R.string.settings_bt_move_wired_error, Toast.LENGTH_SHORT).show()
+                    }
+                    .show()
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = context.dp(8f)
+            })
+        }
         return inner.apply { setPadding(0, context.dp(8f), 0, context.dp(8f)) }
     }
 
@@ -824,6 +865,12 @@ internal class SettingsView(context: Context) : ScrollView(context) {
             context.getString(R.string.settings_log_summary),
             actionButton(context, context.getString(R.string.settings_log_open)) { openDiagnosticLog() },
         )
+        val clear = settingsRow(
+            context,
+            context.getString(R.string.log_clear),
+            context.getString(R.string.log_clear_summary),
+            actionButton(context, context.getString(R.string.action_clear)) { confirmClearDiagnosticLog() },
+        )
         // 日志写在应用私有目录里（别的应用和文件管理器进不去），所以要给一条路把它弄出来：
         // 安卓 4.4 起用系统的「另存为」挑目录，4.1～4.3 直接落到外置存储的 OpenHC/ 目录。
         val exportSummary = if (io.github.gcbond.openhc.settings.LogExport.canSaveToChosenFolder()) {
@@ -854,7 +901,7 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         return settingsGroup(
             context,
             context.getString(R.string.settings_group_diagnostic),
-            listOf(view, export, share, bluetooth),
+            listOf(view, clear, export, share, bluetooth),
         )
     }
 
@@ -892,28 +939,49 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         Toast.makeText(context, message, Toast.LENGTH_LONG).show()
     }
 
+    private fun diagnosticLogText(): String {
+        val connection = DiagnosticLog.read()
+        val crash = CrashDiagnosticLog.read(context)
+        return if (crash == null) connection else "${crash.trimEnd()}\n\n--- 连接日志 ---\n$connection"
+    }
+
+    private fun confirmClearDiagnosticLog(onCleared: () -> Unit = {}) {
+        android.app.AlertDialog.Builder(context)
+            .setTitle(R.string.log_clear)
+            .setMessage(R.string.log_clear_confirm)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.action_clear) { _, _ ->
+                val cleared = DiagnosticLog.clear()
+                if (cleared) onCleared()
+                val message = if (cleared) R.string.log_cleared else R.string.log_clear_failed
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
     private fun openDiagnosticLog() {
-        val text = try {
-            io.github.gcbond.openhc.settings.DiagnosticLog.read()
-        } catch (e: Exception) {
-            e.message ?: e.javaClass.simpleName
+        val text = context.textView(diagnosticLogText(), sizeSp = 11f, color = Palette.Text).apply {
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextIsSelectable(true)
         }
         val scroll = ScrollView(context).apply {
             setPadding(context.dp(12f), context.dp(8f), context.dp(12f), context.dp(8f))
+            addView(text)
         }
-        scroll.addView(
-            context.textView(text, sizeSp = 11f, color = Palette.Text).apply {
-                typeface = android.graphics.Typeface.MONOSPACE
-                setTextIsSelectable(true)
-            },
-        )
-        android.app.AlertDialog.Builder(context)
+        val dialog = android.app.AlertDialog.Builder(context)
             .setTitle(R.string.settings_log_open)
             .setMessage(context.getString(R.string.settings_log_path, io.github.gcbond.openhc.settings.DiagnosticLog.location()))
             .setView(scroll)
+            .setNeutralButton(R.string.log_clear, null)
             .setPositiveButton(android.R.string.ok, null)
-            .setNeutralButton(R.string.log_export) { _, _ -> exportDiagnosticLog() }
+            .setNegativeButton(R.string.log_export) { _, _ -> exportDiagnosticLog() }
             .show()
+        dialog.getButton(DialogInterface.BUTTON_NEUTRAL).setOnClickListener {
+            confirmClearDiagnosticLog {
+                text.text = diagnosticLogText()
+                scroll.scrollTo(0, 0)
+            }
+        }
     }
 
     // ---------- 补全蓝牙配对对话框 ----------

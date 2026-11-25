@@ -75,6 +75,18 @@ class CryptoTest {
         assertNull(AesGcm.decrypt(key, iv, aad, ByteArray(15)))
     }
 
+    @Test
+    fun aesGcmEmptyPayloadChecksTheWholeTag() {
+        val key = ByteArray(16)
+        val iv = ByteArray(12)
+        val aad = ByteArray(0)
+        val sealed = AesGcm.encrypt(key, iv, aad, ByteArray(0))
+        assertEquals("58e2fccefa7e3061367f1d57a4e7455a", sealed.toHex())
+        assertContentEquals(ByteArray(0), AesGcm.decrypt(key, iv, aad, sealed))
+        sealed[sealed.lastIndex] = (sealed.last().toInt() xor 1).toByte()
+        assertNull(AesGcm.decrypt(key, iv, aad, sealed))
+    }
+
     /** RFC 8032 第 7.1 节测试 1、2。 */
     @Test
     fun ed25519Rfc8032() {

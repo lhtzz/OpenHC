@@ -39,6 +39,7 @@ class WiredSession(
     context: Context,
     private val config: WiredSessionConfig,
     private val callback: Callback,
+    private val diagnosticLog: ((String) -> Unit)? = null,
 ) {
 
     interface Callback {
@@ -122,6 +123,7 @@ class WiredSession(
         val usb = app.getSystemService(Context.USB_SERVICE) as? UsbManager
             ?: return end(WiredEndReason.USB_HOST_UNSUPPORTED)
         usbManager = usb
+        log("有线连接开始：安卓 API ${Build.VERSION.SDK_INT}")
         if (!app.packageManager.hasSystemFeature(PackageManager.FEATURE_USB_HOST)) {
             log("系统没有声明支持 USB 主机模式，照常尝试")
         }
@@ -171,7 +173,10 @@ class WiredSession(
                 it.deviceName !in staleNcm && UsbDescriber.phoneMode(it) == PhoneUsbMode.NCM
             }?.let { onNcmDevice(it) }
             Phase.PERMISSION_NCM, Phase.CONNECTED ->
-                if (devices.none { it.deviceName == target }) end(WiredEndReason.PHONE_UNPLUGGED)
+                if (devices.none { it.deviceName == target }) {
+                    log("USB 网卡已不在系统设备列表（轮询，$phase）")
+                    end(WiredEndReason.PHONE_UNPLUGGED)
+                }
             Phase.IDLE, Phase.ENDED -> Unit
         }
     }
@@ -243,7 +248,8 @@ class WiredSession(
                 vpnRevoked = true
                 handler?.post { end(WiredEndReason.VPN_REVOKED) }
             }
-            log("TUN 已建好：${config.carAddress.hostAddress}/${config.prefixLength}，只路由这个网段，只对本应用生效")
+            val scope = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) "，只对本应用生效" else ""
+            log("TUN 已建好：${config.carAddress.hostAddress}/${config.prefixLength}，只路由这个网段$scope")
             true
         } catch (e: IOException) {
             end(if (stopRequested) WiredEndReason.STOPPED else WiredEndReason.VPN_FAILED, e.message)
@@ -351,7 +357,10 @@ class WiredSession(
             Phase.PERMISSION_PHONE -> backToWaitPhone("授权前手机被拔掉")
             // 手机切成 USB 网卡时，普通状态的设备会先断开、约 1.5 秒后网卡设备出现（实测），这是预期的。
             Phase.WAIT_NCM -> log("普通状态的手机已断开，等 USB 网卡出现")
-            Phase.PERMISSION_NCM, Phase.CONNECTED -> end(WiredEndReason.PHONE_UNPLUGGED)
+            Phase.PERMISSION_NCM, Phase.CONNECTED -> {
+                log("收到当前 USB 网卡的系统断开广播（$phase）")
+                end(WiredEndReason.PHONE_UNPLUGGED)
+            }
             Phase.IDLE, Phase.WAIT_PHONE, Phase.ENDED -> Unit
         }
     }
@@ -362,7 +371,13 @@ class WiredSession(
             handler?.post {
                 if (phase != Phase.CONNECTED) return@post
                 when (reason) {
-                    NcmDataPath.LinkDown.USB_LINK_LOST -> end(WiredEndReason.LINK_LOST)
+                    NcmDataPath.LinkDown.USB_LINK_LOST -> {
+                        val stats = dataPath?.stats()
+                        end(
+                            WiredEndReason.LINK_LOST,
+                            "USB 网卡持续读失败，已收到 ${stats?.ntbFromPhone ?: 0} 个数据块，读失败 ${stats?.usbReceiveErrors ?: 0} 次",
+                        )
+                    }
                     NcmDataPath.LinkDown.TUNNEL_CLOSED ->
                         end(if (vpnRevoked) WiredEndReason.VPN_REVOKED else WiredEndReason.TUNNEL_CLOSED)
                     NcmDataPath.LinkDown.INTERNAL_ERROR -> end(WiredEndReason.ERROR, "搬运线程出错")
@@ -371,7 +386,7 @@ class WiredSession(
         }
 
         override fun onMilestone(milestone: NcmDataPath.Milestone, detail: String) {
-            log("数据面 $milestone $detail")
+            handler?.post { if (phase == Phase.CONNECTED) log("数据面 $milestone $detail") }
         }
     }
 
@@ -487,7 +502,12 @@ class WiredSession(
     }
 
     private fun log(message: String) {
-        Log.i(TAG, message)
+        try {
+            diagnosticLog?.invoke(message) ?: Log.i(TAG, message)
+        } catch (e: RuntimeException) {
+            // 诊断不能影响连接。
+            Log.i(TAG, message)
+        }
     }
 
     private companion object {

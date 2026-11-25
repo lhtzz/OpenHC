@@ -9,28 +9,32 @@ import kotlin.test.assertTrue
 class WirelessNetworkPlanTest {
 
     @Test
-    fun olderSystemsFallBackToTheLegacyHotspot() {
-        // 安卓 8.0 起用系统的本地热点（只供本地通信）。
+    fun modernSystemsUseLocalOnlyHotspotWithoutProbing() {
         for (sdk in listOf(26, 28, 29, 30, 31, 33, 36)) {
-            assertTrue(WirelessNetworkPlan.hotspotSupported(sdk), "安卓 $sdk")
-            assertFalse(WirelessNetworkPlan.usesLegacyHotspot(sdk), "安卓 $sdk 不该走旧接口")
-        }
-        // 安卓 4.1～7.1 走旧的 setWifiApEnabled（普通个人热点）。
-        for (sdk in listOf(16, 17, 18, 19, 20, 21, 22, 23, 24, 25)) {
-            assertTrue(WirelessNetworkPlan.hotspotSupported(sdk), "安卓 $sdk")
-            assertTrue(WirelessNetworkPlan.usesLegacyHotspot(sdk), "安卓 $sdk 要走旧接口")
-        }
-        // 比 minSdk 还低的只在单元测试里出现：按区间算仍然算「不支持」，实际装不上。
-        for (sdk in listOf(14, 15)) {
-            assertFalse(WirelessNetworkPlan.hotspotSupported(sdk), "安卓 $sdk")
-            assertFalse(WirelessNetworkPlan.usesLegacyHotspot(sdk), "安卓 $sdk")
+            assertTrue(WirelessNetworkPlan.hotspotSupported(sdk) { error("不应探测旧接口") }, "安卓 API $sdk")
+            assertFalse(WirelessNetworkPlan.usesLegacyHotspot(sdk))
         }
     }
 
     @Test
-    fun theMinimumIsTheOldInterfaceNotTheLocalOnlyHotspot() {
-        assertEquals(16, WirelessNetworkPlan.LEGACY_HOTSPOT_MIN_SDK)
-        assertEquals(26, WirelessNetworkPlan.HOTSPOT_MIN_SDK)
+    fun android41Through71UseLegacyHotspotOnlyWhenTheRomExposesIt() {
+        for (sdk in 16..25) {
+            assertTrue(WirelessNetworkPlan.usesLegacyHotspot(sdk))
+            assertTrue(WirelessNetworkPlan.hotspotSupported(sdk) { true }, "安卓 API $sdk")
+            assertFalse(WirelessNetworkPlan.hotspotSupported(sdk) { false }, "安卓 API $sdk")
+        }
+    }
+
+    @Test
+    fun systemsBelowTheAppMinimumDoNotProbeTheLegacyInterface() {
+        assertFalse(WirelessNetworkPlan.usesLegacyHotspot(15))
+        assertFalse(WirelessNetworkPlan.hotspotSupported(15) { error("低于应用最低版本") })
+    }
+
+    @Test
+    fun carHotspotOnApi17DoesNotRequireAnApplicationHotspotApi() {
+        assertTrue(WirelessNetworkPlan.hotspotSupported(17, carHotspot = true) { error("不应调用旧热点接口") })
+        assertFalse(WirelessNetworkPlan.hotspotSupported(15, carHotspot = true) { error("低于应用最低版本") })
     }
 
     @Test

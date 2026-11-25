@@ -23,6 +23,7 @@ import io.github.gcbond.openhc.core.auth.crypto.HmacSha256
 import io.github.gcbond.openhc.core.auth.crypto.Modp
 import io.github.gcbond.openhc.core.auth.crypto.Sha256
 import io.github.gcbond.openhc.core.auth.crypto.X25519Keys
+import io.github.gcbond.openhc.core.auth.hichain.HiChainBuild
 import io.github.gcbond.openhc.core.auth.hichain.KeyAgreementConst
 import io.github.gcbond.openhc.core.auth.hichain.decryptPayload
 import io.github.gcbond.openhc.core.auth.hichain.draw
@@ -263,7 +264,9 @@ internal class TestPhone(
         stsSessionKey = Hkdf.sha256(shared, salt, KeyAgreementConst.STS_AUTH_INFO, 16)
         val carSign = decryptPayload(stsSessionKey, authData, selfChallenge, 256)!!
         val message = peerStsPublic + peerId + stsPublic + selfId
-        check(Ed25519Keys.verify(store.carPublicKey!!, Sha256.digest(message), carSign)) { "车机签名不对" }
+        if (!Ed25519Keys.verify(store.carPublicKey!!, Sha256.digest(message), carSign)) {
+            return HiChainBuild.inform(HcError.VERIFY_PROOF_FAILED.code)
+        }
         val sign = Ed25519Keys.sign(store.seed!!, Sha256.digest(stsPublic + selfId + peerStsPublic + peerId))
         val cipher = encryptPayload(stsSessionKey, sign, peerChallenge, random)
         return "{\"authForm\":0,\"message\":18,\"payload\":{\"authData\":\"${hex(cipher)}\"}}"

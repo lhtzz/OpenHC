@@ -58,8 +58,8 @@
     <string name="hint_projecting_waiting_frame">%1$d×%2$d · %3$d fps，等待第一帧画面…</string>
     <string name="hint_projecting_no_touch">%1$d×%2$d · %3$d fps。这次手机没有开放触摸，只能看画面。</string>
     <string name="hint_stopping">正在断开连接，请稍候…</string>
-    <string name="hint_replug_unplug">这次插入已经用过，手机不会再响应车机。请拔掉数据线，等 5 秒以上再插回。</string>
-    <string name="hint_replug_wait">已拔下。再等几秒后插回，就会自动连接。</string>
+    <string name="hint_replug_unplug">请拔掉数据线，等 5 秒以上再插回，车机会自动尝试连接。</string>
+    <string name="hint_replug_wait">暂未检测到手机的 USB 连接。请确认数据线已拔出，等满 5 秒后再插回。</string>
 
     <!-- 提示与错误 -->
     <string name="notice_identity_missing">安装包不完整，连不了手机，请重新安装。</string>
@@ -96,6 +96,9 @@
     <string name="end_session_auth_closed">配对没有完成：手机断开了认证（在手机上取消了，或者连接码输错了）</string>
     <string name="end_session_not_trusted">手机要求免码回连，但车机上没有它的配对记录。请在手机上删除这台车机，再重新连接配对。</string>
     <string name="end_session_auth_failed">认证失败（%1$s）</string>
+    <string name="end_session_auth_peer_failed">手机返回认证失败（代码 %1$d）</string>
+    <string name="end_session_sts_peer_proof_failed">手机拒绝了车机的免码认证应答（代码 %1$d）。可在手机 HiCar 中移除此车机，重插后重新配对。</string>
+    <string name="end_session_missing_car_key">车机找不到这次免码回连所需的原配对密钥。若改过蓝牙地址，请恢复原设置；否则在手机 HiCar 中移除此车机后重新配对。</string>
     <string name="end_session_keepalive">手机没有响应（保活超时）</string>
     <string name="end_projection_teardown">手机结束了投屏</string>
     <string name="end_projection_control_closed">手机关闭了投屏控制连接</string>
@@ -116,7 +119,15 @@
     <string name="settings_bt">车机蓝牙地址</string>
     <string name="settings_bt_current_property">当前使用：%1$s（读自车机系统）</string>
     <string name="settings_bt_current_manual">当前使用：%1$s（手动填写）</string>
-    <string name="settings_bt_current_unavailable">当前：没有取到，按 02:00:00:00:00:00 处理（有线照样能连）</string>
+    <string name="settings_bt_current_unavailable">未取得真实蓝牙地址；首次有线连接时自动生成并保存专用地址。</string>
+    <string name="settings_bt_current_wired_local">有线使用：%1$s（仅用于数据线，不用于无线）</string>
+    <string name="settings_bt_move_wired">把手填地址设为仅有线</string>
+    <string name="settings_bt_move_wired_confirm">保留当前地址和有线配对，只把它改为仅供数据线连接。无线不会再使用这个手填地址。下次连接生效。</string>
+    <string name="settings_bt_replace_wired_confirm">把手填地址保存为新的有线专用地址，无线不再使用它。有线身份可能改变，下次连接可能需要重新配对。</string>
+    <string name="settings_bt_move_wired_done">已保存为仅有线地址</string>
+    <string name="settings_bt_reset_wired">清除有线专用地址</string>
+    <string name="settings_bt_reset_wired_confirm">下次有线改用手填或系统蓝牙地址；仍读不到时会生成新的专用地址。不会删除配对记录，但地址变了可能需要重新配对。</string>
+    <string name="settings_bt_move_wired_error">无法保存有线专用地址，设置未更改</string>
     <string name="settings_bt_manual_label">手动填写（格式 AA:BB:CC:DD:EE:FF）</string>
     <string name="settings_bt_invalid">格式不对，或者是占位地址</string>
     <string name="action_read_bt_address">自动读取本机蓝牙地址</string>
@@ -125,7 +136,7 @@
     <string name="settings_bt_candidate">%1$s（来自%2$s）</string>
     <string name="settings_bt_candidate_selected">✓ %1$s（来自%2$s）</string>
     <string name="settings_bt_read_not_found">没读到。你的车机把地址放在了本应用读不到的地方，请手动填写（可在车机上执行 adb shell getprop | grep -i bt 查找）。</string>
-    <string name="settings_bt_hint">手填了有效地址时优先用手填的，清空就改用车机系统里读到的。地址变了，手机会把车机当成另一台车，需要重新输入连接码配对。</string>
+    <string name="settings_bt_hint">无线需要真实蓝牙地址。已保存有线专用地址时，有线优先沿用它；否则手填优先。更换连接用的地址可能需要重新配对。</string>
 
     <!-- 通知 -->
     <string name="notification_channel_name">投屏连接</string>

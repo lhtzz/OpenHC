@@ -5,6 +5,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.os.Build
 import android.os.SystemClock
 import io.github.gcbond.openhc.core.common.MalformedMessageException
 import io.github.gcbond.openhc.platform.net.NtbOutLayout
@@ -69,48 +70,30 @@ internal class NcmUsbLink private constructor(
     }
 
     companion object {
-        /** USB 标准请求 SET_INTERFACE：bmRequestType 0x01（标准、接口、出）、bRequest 0x0B。 */
-        private const val SET_INTERFACE_REQUEST_TYPE = 0x01
-        private const val SET_INTERFACE_REQUEST = 0x0B
         private const val CONTROL_TIMEOUT_MS = 1000
         private const val NOTIFICATION_TIMEOUT_MS = 300
         private const val DEFAULT_ZLP_PACKET_SIZE = 512
 
-        /**
-         * 切换接口的备用设置。
-         *
-         * `UsbDeviceConnection.setInterface` 是 API 21 才有；安卓 4.1～4.4 上用 USB 规范里的标准请求
-         * `SET_INTERFACE`（bmRequestType=0x01 出、bRequest=0x0B）走 `controlTransfer`，效果一样。
-         */
-        private fun setInterfaceCompat(
-            connection: android.hardware.usb.UsbDeviceConnection,
-            iface: android.hardware.usb.UsbInterface,
-        ): Boolean {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                return connection.setInterface(iface)
-            }
-            return try {
-                val n = connection.controlTransfer(
-                    SET_INTERFACE_REQUEST_TYPE, SET_INTERFACE_REQUEST, alternateSettingOf(iface), iface.id,
-                    null, 0, CONTROL_TIMEOUT_MS,
-                )
-                n >= 0
-            } catch (e: RuntimeException) {
-                false
+        /** 切换手机和车机内核的备用设置，不能只向手机发 SET_INTERFACE 控制传输。 */
+        private fun setInterfaceCompat(connection: UsbDeviceConnection, iface: UsbInterface, alternate: Int) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                if (!connection.setInterface(iface)) throw IOException("数据口切到备用 $alternate 失败")
+            } else {
+                LegacyUsbInterface.setAlternate(connection.fileDescriptor, iface.id, alternate)
             }
         }
 
-        /**
-         * 接口的备用设置号。`UsbInterface.getAlternateSetting` 是 API 21 才有；
-         * 低版本按 0 处理（4.x 车机上 NCM 数据口就在备用 0）。
-         */
-        private fun alternateSettingOf(iface: android.hardware.usb.UsbInterface): Int =
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                iface.alternateSetting
-            } else {
-                0
-            }
-
+        /** 旧框架枚举了各备用接口及端点，却没有保留备用号；从 USB 描述符中按端点匹配。 */
+        private fun alternateSettingOf(
+            iface: UsbInterface,
+            description: UsbInterfaceDescription,
+            legacyDescriptors: ByteArray?,
+        ): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            iface.alternateSetting
+        } else {
+            legacyDescriptors?.let { LegacyUsbDescriptors.alternateSetting(it, description) }
+                ?: throw IOException("无法从 USB 描述符确认接口 ${iface.id}（${iface.endpointCount} 个端点）的备用设置号")
+        }
 
         /**
          * 打开切成 USB 网卡的手机：强占控制口和数据口 → 读 NTB 参数 → 数据口切到备用 0（NCM 功能复位）→
@@ -124,7 +107,7 @@ internal class NcmUsbLink private constructor(
                 ?: throw IOException("没找到 NCM 控制口或带批量端点的数据口")
             val control = device.getInterface(selection.control.index)
             val dataActive = device.getInterface(selection.dataActive.index)
-            val dataIdle = selection.dataIdle?.let { device.getInterface(it.index) }
+            val idleDescription = selection.dataIdle
             val bulkIn = dataActive.getEndpoint(selection.bulkIn.index)
             val bulkOut = dataActive.getEndpoint(selection.bulkOut.index)
             val notification = selection.notification?.let { control.getEndpoint(it.index) }
@@ -138,9 +121,25 @@ internal class NcmUsbLink private constructor(
                 if (!connection.claimInterface(control, true) || !connection.claimInterface(dataActive, true)) {
                     throw IOException("抢占 NCM 接口失败")
                 }
+                val legacyDescriptors = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+                    connection.rawDescriptors ?: throw IOException("读不到 USB 网卡描述符")
+                } else {
+                    null
+                }
+                val activeAlternate = alternateSettingOf(dataActive, selection.dataActive, legacyDescriptors)
+                log("USB 网卡数据接口 ${dataActive.id}：带端点的备用设置 $activeAlternate（${dataActive.endpointCount} 个端点）")
                 val parameters = readNtbParameters(connection, control.id, log)
-                // setInterface 是 API 21 才有；安卓 4.1～4.4 上退到 SET_INTERFACE 控制传输（USB 规范的标准请求）。
-                if (dataIdle != null && !setInterfaceCompat(connection, dataIdle)) log("数据口切到备用 0 失败，继续")
+                // 加载失败不是可忽略的空闲档切换失败，避免同一错误连续报两遍。
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) LegacyUsbInterface.requireLoaded()
+                if (idleDescription != null) {
+                    val dataIdle = device.getInterface(idleDescription.index)
+                    try {
+                        val idleAlternate = alternateSettingOf(dataIdle, idleDescription, legacyDescriptors)
+                        setInterfaceCompat(connection, dataIdle, idleAlternate)
+                    } catch (e: IOException) {
+                        log("数据口切到空闲设置失败，继续：${e.message}")
+                    }
+                }
                 val plan = CdcNcm.receivePlan(parameters?.ntbInMaxSize, sdkInt)
                 plan.setInputSize?.let { size ->
                     // 规范要求数据口在备用 0 时才能改 NTB 输入上限。
@@ -154,9 +153,8 @@ internal class NcmUsbLink private constructor(
                         else "压低手机 NTB 上限失败（返回 $n），超过 $size 字节的块会被截断丢弃",
                     )
                 }
-                if (!setInterfaceCompat(connection, dataActive)) {
-                    throw IOException("数据口切到备用 ${alternateSettingOf(dataActive)} 失败")
-                }
+                setInterfaceCompat(connection, dataActive, activeAlternate)
+                log("USB 网卡数据接口 ${dataActive.id} 已切至备用 $activeAlternate，可开始收发")
                 notification?.let {
                     // 手机切好后会在通知端点上报连接状态与速率；读掉一条，与实测通过的做法一致。读不到也不要紧。
                     connection.bulkTransfer(it, ByteArray(16), 16, NOTIFICATION_TIMEOUT_MS)

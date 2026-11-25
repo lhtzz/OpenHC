@@ -444,7 +444,7 @@ class LocalHotspotOwner private constructor(context: Context) {
         } catch (e: RuntimeException) {
             return rejected("开热点出错：${e.javaClass.simpleName}：${e.message}")
         }
-        if (!accepted) return rejected("系统没有收下开热点的请求")
+        if (!accepted) return rejectedLegacyStart("系统没有收下开热点的请求")
         note("系统收下了申请，等热点开起来（旧接口没有回调，轮询状态）")
         legacyDeadline = now() + LEGACY_START_WAIT_MS
         legacyPoll()
@@ -466,10 +466,20 @@ class LocalHotspotOwner private constructor(context: Context) {
                 drive { machine.onStarted(now()) }
                 return
             }
-            WIFI_AP_STATE_FAILED -> return rejected("系统开热点失败（WIFI_AP_STATE_FAILED）")
+            WIFI_AP_STATE_FAILED -> return rejectedLegacyStart("系统开热点失败（WIFI_AP_STATE_FAILED）")
         }
-        if (now() >= legacyDeadline) return rejected("申请开热点后 ${LEGACY_START_WAIT_MS / 1000} 秒热点还没起来")
+        if (now() >= legacyDeadline) return rejectedLegacyStart("申请开热点后 ${LEGACY_START_WAIT_MS / 1000} 秒热点还没起来")
         handler.postDelayed(legacyPollTask, LEGACY_POLL_MS)
+    }
+
+    /** 单射频老车机可能拒绝在 Wi-Fi 客户端仍开启时开热点；失败时提示，不擅自断开用户网络。 */
+    private fun rejectedLegacyStart(message: String) {
+        val hint = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP && stationEnabled()) {
+            "。可先在车机设置里关闭用来连接路由器的 Wi-Fi（不是手动开热点），再试无线连接"
+        } else {
+            ""
+        }
+        rejected(message + hint)
     }
 
     /** 旧接口开的热点：配置是我们自己给的那份，读回来核对。 */

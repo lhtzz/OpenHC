@@ -1,6 +1,10 @@
 package io.github.gcbond.openhc.core.auth
 
 import io.github.gcbond.openhc.core.auth.hichain.CompactJson
+import io.github.gcbond.openhc.core.auth.hichain.HiChainCode
+import io.github.gcbond.openhc.core.auth.hichain.HiChainLimits
+import io.github.gcbond.openhc.core.auth.hichain.field
+import io.github.gcbond.openhc.core.auth.hichain.hexValue
 import io.github.gcbond.openhc.core.auth.hichain.parseJsonObject
 import io.github.gcbond.openhc.core.auth.hichain.exactString
 import io.github.gcbond.openhc.core.auth.hichain.strictInt
@@ -27,7 +31,7 @@ import java.security.SecureRandom
  * 握手里的 `usb_connection` 必须和 [HiCarAuthConfig.usbConnection] 一致，否则按
  * [AuthFailure.UnsupportedConnection] 失败。
  *
- * 重发的设备握手：手机刚从免码回连改走输码时，会在约 150 ms 内把设备握手连发两遍、中间没有认证数据（2026-11 用户日志）。
+ * 重发的设备握手：手机在免码回连或改走输码时，可能在认证数据交换之前连发设备握手。
  * 认证数据开始交换之前再来的握手，按新的一次重新应答（新建认证器，连接码沿用第一次的），一条连接上最多 [MAX_HANDSHAKES] 次；
  * 认证数据开始交换之后再来、次数超了、或者换了 deviceId，仍按协议错误结束。
  *
@@ -105,8 +109,9 @@ class HiCarAuthSession(
         val hasPin = body.booleanField("has_pin")
         val usbConnection = body.booleanField("usb_connection")
         val version = root.exactString("version")
-        // 诊断只记这几个标志，不记 deviceId。
-        val flags = "has_pin=$hasPin，usb_connection=$usbConnection，version=${version ?: "无"}"
+        // 文件诊断只记标志和常见版本号，不写手机身份或任意文本。原始版本仍交给协议层处理。
+        val loggedVersion = version?.let { if (LOGGABLE_VERSION.matches(it)) it else "未识别" } ?: "无"
+        val flags = "has_pin=$hasPin，usb_connection=$usbConnection，version=$loggedVersion"
         val previous = handshake
         if (previous != null && (hiChainSeen || handshakes >= MAX_HANDSHAKES)) {
             val why = if (hiChainSeen) "认证数据已经开始交换" else "这条连接上已经握手 $handshakes 次"
@@ -133,11 +138,14 @@ class HiCarAuthSession(
         }
         val pin = if (hasPin) config.pin ?: (generatedPin ?: PinCodes.random(random).also { generatedPin = it }) else null
         val auth = authenticators.create(AccessoryAuthConfig(config.service, config.selfAuthId, deviceId, pin))
-        val note = HiCarAuthAction.Note("手机握手：$flags；本机有这台手机的配对记录=${auth.peerTrusted}")
-        if (!hasPin && !auth.peerTrusted) {
-            // 手机要求免码回连，但本机没有它的信任记录：不回应答，由上层断开。
+        val note = HiCarAuthAction.Note(
+            "手机握手：$flags；有手机配对记录=${auth.peerTrusted}；有车机长期密钥=${auth.hasStoredLocalIdentity}",
+        )
+        if (!hasPin && (!auth.peerTrusted || !auth.hasStoredLocalIdentity)) {
+            // 免码回连两边的长期身份都要在。不能新造一把车机密钥冒充配对时的密钥。
+            val failure = if (!auth.peerTrusted) AuthFailure.NotTrusted else AuthFailure.MissingLocalIdentity
             isFinished = true
-            return listOfNotNull(repeat, note, HiCarAuthAction.Failed(AuthFailure.NotTrusted))
+            return listOfNotNull(repeat, note, HiCarAuthAction.Failed(failure))
         }
         authenticator = auth
         val authMode = if (hasPin) AuthMode.PIN_PAIRING else AuthMode.TRUSTED_RECONNECT
@@ -159,7 +167,7 @@ class HiCarAuthSession(
     private fun onHiChain(data: String): List<HiCarAuthAction> {
         val auth = authenticator ?: throw MalformedMessageException("设备握手之前收到认证数据")
         hiChainSeen = true
-        val received = messageCode(data)
+        val received = describeReceivedMessage(data, checkNotNull(handshake).deviceId)
         val replies = ArrayList<String>(1)
         val actions = ArrayList<HiCarAuthAction>()
         for (action in auth.onMessage(data)) {
@@ -187,10 +195,24 @@ class HiCarAuthSession(
         return actions
     }
 
-    /** 认证库消息的消息码（诊断用）；解析不了不在这里报错，交给认证器按原样处理。 */
-    private fun messageCode(text: String): String = try {
-        codeText(parseJsonObject(text, "认证库消息")["message"].strictInt())
+    /** 认证摘要；可选的 STS 请求方身份只做比对，不作为信任输入、不输出原值。 */
+    private fun describeReceivedMessage(text: String, expectedPhoneId: String): String = try {
+        val root = parseJsonObject(text, "认证库消息")
+        val code = root["message"].strictInt()
+        val hex = codeText(code)
+        if (code != HiChainCode.AUTH_START_REQUEST) hex else {
+            val payload = root["payload"] as? JsonObject
+            val declared = payload?.hexValue("peerAuthId", HiChainLimits.AUTH_ID)
+            val relation = when {
+                payload?.field("peerAuthId") == null -> "未提供"
+                declared == null || declared.isEmpty() -> "格式不符"
+                declared.contentEquals(expectedPhoneId.toByteArray(Charsets.US_ASCII)) -> "一致"
+                else -> "不一致"
+            }
+            "$hex（STS 请求方身份与外层握手：$relation）"
+        }
     } catch (e: MalformedMessageException) {
+        // 交给认证器按原样处理，不改变报错和消息顺序。
         "无法解析的消息"
     }
 
@@ -217,6 +239,8 @@ class HiCarAuthSession(
 
         /** 一条认证连接上最多接受的设备握手次数（含重发）。 */
         const val MAX_HANDSHAKES = 3
+
+        val LOGGABLE_VERSION = Regex("[0-9]{1,8}(?:\\.[0-9]{1,8}){1,3}|P_0@[0-9]{14}")
     }
 }
 
