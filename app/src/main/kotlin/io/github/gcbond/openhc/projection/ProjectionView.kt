@@ -65,18 +65,22 @@ class ProjectionView @JvmOverloads constructor(
         keepScreenOn = value
         if (value && io.github.gcbond.openhc.compat.Compat.isAttached(this)) hideSystemBars()
         else restoreSystemBars()
-        val ready = surface?.isValid == true
+        val ready = surfaces.holderReady
         DiagnosticLog.log(LOG_TAG, "${if (value) "显示" else "暂离"}投屏页：画布有效=$ready")
     }
 
     private val surfaceView = SurfaceView(context)
     private val touchMapper = TouchMapper(edgeSlopPx = EDGE_SLOP_DP * resources.displayMetrics.density)
-    private var surface: Surface? = null
     private var surfaceListener: SurfaceListener? = null
+    private val surfaces = ProjectionSurfaceSlot<Surface>({ it.isValid }) { surfaceListener?.onSurfaceChanged(it) }
     private var attachedDecoder: VideoDecoder? = null
     private var videoWidth = 0
     private var videoHeight = 0
     private var barsHidden = false
+
+    /** 已用于布局和触摸换算的矩形，供界面诊断区分缩放黑边和系统栏留白。 */
+    internal var laidOutViewport: VideoViewport? = null
+        private set
 
     init {
         setBackgroundColor(Color.BLACK)
@@ -152,6 +156,7 @@ class ProjectionView @JvmOverloads constructor(
         // 显示画面的 Surface 摆在等比缩放后的矩形里，触摸按同一个矩形换算。
         val viewport = viewportFor(right - left, bottom - top)
         if (viewport != null) surfaceView.layout(viewport.left, viewport.top, viewport.right, viewport.bottom)
+        laidOutViewport = viewport
         deliver(touchMapper.setViewport(viewport))
     }
 
@@ -184,11 +189,17 @@ class ProjectionView @JvmOverloads constructor(
         }
     }
 
+    /** Activity 真正退到车机桌面才停输出；应用内返回首页仍保留画布。 */
+    internal fun setHostStarted(started: Boolean) {
+        if (!surfaces.setHostStarted(started)) return
+        if (!started) releaseTouches()
+        if (presenting) {
+            DiagnosticLog.log(LOG_TAG, "车机页面${if (started) "回前台" else "退到后台"}：画布有效=${surfaces.holderReady}")
+        }
+    }
+
     private fun updateSurface(newSurface: Surface?) {
-        // SurfaceView 重建时给的是同一个 Surface 对象，中间一定先经过销毁（null），所以按引用比较就够了。
-        if (newSurface === surface) return
-        surface = newSurface
-        surfaceListener?.onSurfaceChanged(newSurface)
+        if (!surfaces.setSurface(newSurface)) return
         DiagnosticLog.log(LOG_TAG, "画布${if (newSurface == null) "销毁" else "创建"}：投屏页前台=$presenting")
     }
 
@@ -196,7 +207,7 @@ class ProjectionView @JvmOverloads constructor(
         if (listener === surfaceListener) return
         surfaceListener?.onSurfaceChanged(null)
         surfaceListener = listener
-        surface?.let { listener?.onSurfaceChanged(it) }
+        surfaces.output?.let { listener?.onSurfaceChanged(it) }
     }
 
     private fun viewportFor(width: Int, height: Int): VideoViewport? =

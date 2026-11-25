@@ -1120,6 +1120,10 @@ class WirelessController(
     }
 
     private inner class DecoderListener(private val attemptId: Int) : VideoDecoder.Listener {
+        override fun onSurfaceRecovery(message: String) {
+            DiagnosticLog.log("OpenHC-Projection", "无线 #$attemptId：$message")
+        }
+
         override fun onVideoSizeChanged(width: Int, height: Int) {
             post { if (attempt?.id == attemptId) apply(WirelessSignal.VideoSize(width, height)) }
         }

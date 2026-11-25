@@ -30,6 +30,7 @@ import io.github.gcbond.openhc.projection.ProjectionPageSlot
 import io.github.gcbond.openhc.projection.ProjectionView
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
+import io.github.gcbond.openhc.settings.DiagnosticLog
 import io.github.gcbond.openhc.settings.LogExport
 import io.github.gcbond.openhc.startup.BootStart
 import io.github.gcbond.openhc.startup.BootStartPolicy
@@ -63,6 +64,7 @@ class MainActivity : Activity() {
 
     private lateinit var settings: AppSettings
     private var pendingStart: StartKind? = null
+    private var vpnConfirmationInFlight = false
 
     private val controller: ConnectionController get() = (application as OpenHcApp).connection
     private val wireless: WirelessController get() = (application as OpenHcApp).wireless
@@ -74,6 +76,7 @@ class MainActivity : Activity() {
     private var homeView: HomeView? = null
     private var settingsView: SettingsView? = null
     private val projectionPage = ProjectionPageSlot(::mountProjectionPage, ::unmountProjectionPage)
+    private var projectionHostStarted = false
 
     private class ProjectionPage(val frame: ProjectionFrame, val view: ProjectionView, val notice: TextView) {
         var touchResets: Int? = null
@@ -248,6 +251,7 @@ class MainActivity : Activity() {
     private fun mountProjectionPage(owner: ProjectionOwner): ProjectionPage {
         val immersive = io.github.gcbond.openhc.connection.DisplayArea.activeFullScreen
         val view = ProjectionView(this).apply {
+            setHostStarted(projectionHostStarted)
             fullScreen = immersive
             onInput = { input ->
                 if (owner.wireless) wireless.sendInput(input) else controller.sendInput(input)
@@ -260,7 +264,7 @@ class MainActivity : Activity() {
             setBackgroundColor(0xAA000000.toInt())
             setPadding(dp(8), dp(6), dp(8), dp(6))
         }
-        val frame = ProjectionFrame(this, immersive).apply {
+        val frame = ProjectionFrame(this, immersive, view).apply {
             addView(view, fillParent())
             addView(
                 notice,
@@ -310,6 +314,18 @@ class MainActivity : Activity() {
         FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    override fun onStart() {
+        super.onStart()
+        projectionHostStarted = true
+        projectionPage.mountedPage?.view?.setHostStarted(true)
+    }
+
+    override fun onStop() {
+        projectionHostStarted = false
+        projectionPage.mountedPage?.view?.setHostStarted(false)
+        super.onStop()
+    }
 
     override fun onResume() {
         super.onResume()
@@ -397,7 +413,7 @@ class MainActivity : Activity() {
             return
         }
         pendingStart = kind
-        askNextPermission()
+        if (!vpnConfirmationInFlight) askNextPermission()
     }
 
     /** 开始前的运行时权限按顺序问，每样只自动问一次；问完（同意与否）接着 [continueStart]。 */
@@ -435,15 +451,20 @@ class MainActivity : Activity() {
 
     private fun continueStart() {
         val kind = pendingStart ?: return
+        if (vpnConfirmationInFlight) return
         when (val consent = VpnConsent.check(this)) {
             VpnConsent.Status.Granted -> {
                 pendingStart = null
                 dispatch(kind)
             }
             is VpnConsent.Status.NeedsUserConsent -> try {
+                // 开机拉起和插线请求可能同时到，不重复拉起同一个系统确认框。
+                vpnConfirmationInFlight = true
                 @Suppress("DEPRECATION")
                 startActivityForResult(consent.intent, REQ_VPN)
+                DiagnosticLog.log(TAG, "有线 VPN 授权：系统要求确认（$kind，API ${Build.VERSION.SDK_INT}）")
             } catch (e: ActivityNotFoundException) {
+                vpnConfirmationInFlight = false
                 pendingStart = null
                 controller.reportBlocked(Notice.VpnUnavailable(getString(R.string.vpn_dialog_missing)))
             }
@@ -464,13 +485,15 @@ class MainActivity : Activity() {
             return
         }
         if (requestCode != REQ_VPN) return
+        vpnConfirmationInFlight = false
         val kind = pendingStart
         pendingStart = null
         if (kind == null) return
         if (resultCode == RESULT_OK && VpnConsent.isGranted(this)) {
+            DiagnosticLog.log(TAG, "有线 VPN 授权：已确认")
             dispatch(kind)
         } else {
-            Log.i(TAG, "用户没有同意 VPN 授权")
+            DiagnosticLog.log(TAG, "有线 VPN 授权：未获系统授权")
             controller.reportBlocked(Notice.VpnConsentRequired)
         }
     }

@@ -14,6 +14,7 @@ internal class ProjectionPageSlot<Page : Any>(
     class Entry<Page>(val owner: ProjectionOwner, val page: Page)
 
     private var entry: Entry<Page>? = null
+    val mountedPage: Page? get() = entry?.page
 
     fun reconcile(requested: ProjectionOwner?, isActive: (ProjectionOwner) -> Boolean): Entry<Page>? {
         val visible = requested?.takeIf(isActive)

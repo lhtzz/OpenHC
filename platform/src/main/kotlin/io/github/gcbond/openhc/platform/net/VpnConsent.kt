@@ -7,8 +7,9 @@ import android.content.Intent
 import android.net.VpnService
 
 /**
- * 有线连接前要先拿到用户的 VPN 授权（[WiredVpnService] 建 TUN 需要）。授权是持久的，同意一次之后不再弹框，
- * 但别的 VPN 应用被用户启用后，本应用的授权会被取代，需要重新同意。
+ * 有线连接前要先拿到用户的 VPN 授权（[WiredVpnService] 建 TUN 需要），与 USB 授权无关。
+ * 以每次 [VpnService.prepare] 的结果为准：原生 Android 4.2.2 只在运行中的系统保留准备好的 VPN，
+ * 整机重启后会再次请求确认；启动其他 VPN 也可能取代授权。
  *
  * 应用层用法（在开始有线会话之前）：
  * ```

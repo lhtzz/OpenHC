@@ -322,7 +322,7 @@ internal class SettingsView(context: Context) : ScrollView(context) {
             title = context.getString(R.string.settings_usb_auto),
             description = context.getString(
                 if (UsbAutoConnect.isEnabled(context)) R.string.settings_usb_auto_hint_on else R.string.settings_usb_auto_hint_off,
-            ),
+            ) + "\n" + context.getString(R.string.settings_usb_auto_vpn_note),
             checked = UsbAutoConnect.isEnabled(context),
         ) { value ->
             UsbAutoConnect.setEnabled(context, value)

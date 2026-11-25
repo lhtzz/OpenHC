@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 设置页：插线时不再弹窗（含插线就连） -->
-    <string name="settings_usb_auto">插线时不再弹窗</string>
-    <string name="settings_usb_auto_hint_off">关着：每次连接都要在系统弹框里点两次「确定」（手机切换连接方式前后各一次），插线也不会自动打开 OpenHC。打开后，第一次插手机时在系统弹框里勾选「默认使用」（有的车机写作「默认情况下用于该 USB 设备」）再点确定，以后插线就自动打开 OpenHC 并连接，不再弹框。</string>
-    <string name="settings_usb_auto_hint_on">第一次插手机时，系统会弹框：勾选「默认使用」（有的车机写作「默认情况下用于该 USB 设备」）再点确定；手机切换连接方式后会再弹一次，同样勾选。之后插上这部手机就自动打开 OpenHC 并连接，不再弹框。换手机要重新勾选。第一次设置时没连上的话，拔掉数据线等 5 秒以上再插。开着时插上华为、荣耀手机（哪怕只是充电）都会打开 OpenHC。</string>
+    <string name="settings_usb_auto">插线时不再弹窗（仅 USB）</string>
+    <string name="settings_usb_auto_hint_off">关着：每次连接通常要分别确认两次 USB 授权（手机切换连接方式前后各一次），插线也不会自动打开 OpenHC。打开后，第一次插手机时在系统弹框里勾选「默认使用」（有的车机写作「默认情况下用于该 USB 设备」）再点确定，以后插线由系统拉起 OpenHC，并尝试自动授予 USB 权限。</string>
+    <string name="settings_usb_auto_hint_on">第一次插手机时，系统会弹框：勾选「默认使用」（有的车机写作「默认情况下用于该 USB 设备」）再点确定；手机切换连接方式后会再弹一次，同样勾选。之后插上这部手机就自动打开 OpenHC；系统记住默认使用时，不再弹 USB 授权框。换手机要重新勾选。第一次设置时没连上的话，拔掉数据线等 5 秒以上再插。开着时插上华为、荣耀手机（哪怕只是充电）都会打开 OpenHC。</string>
+    <string name="settings_usb_auto_vpn_note">只影响 USB 授权。有线使用的 VPN 由 Android 单独授权，安卓 4.2.2 整机重启后可能要再勾选「我信任」。</string>
 </resources>

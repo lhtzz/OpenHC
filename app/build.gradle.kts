@@ -19,6 +19,11 @@ val signingProperties: Properties? = (
     ?.takeIf { it.isNotBlank() }
     ?.let { path -> Properties().apply { file(path).inputStream().use { load(it) } } }
 
+// 标准包不变更包名；本机实测包和公开无身份预览包分别使用独立包名，避免互相覆盖。
+val api17Profile = providers.gradleProperty("openhc.api17Profile").orElse("standard").get()
+require(api17Profile in setOf("standard", "local-test", "public-preview")) { "Unknown openhc.api17Profile: $api17Profile" }
+val publicApi17Preview = api17Profile == "public-preview"
+
 // 连接参数（openhc-identity.json，格式见 docs/identity.example.json）：不进仓库，构建时从本机目录打进 assets。
 // 环境变量 OPENHC_IDENTITY_DIR 优先，其次 local.properties 的 openhc.identity.dir；都没有就不打包，装上后首页提示缺少。
 val identityFileName = "openhc-identity.json"
@@ -35,22 +40,36 @@ val identityDir: File? = (
         }
     }
 
+if (publicApi17Preview) {
+    require(identityDir == null && fileTree("src").matching { include("**/$identityFileName") }.isEmpty) {
+        "公开预览包不允许携带连接身份；请移除身份配置及 src 下的 $identityFileName"
+    }
+}
+
 android {
     namespace = "io.github.gcbond.openhc"
     compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "io.github.gcbond.openhc"
+        applicationId = when (api17Profile) {
+            "local-test" -> "io.github.gcbond.openhc.api17test"
+            "public-preview" -> "io.github.gcbond.openhc.api17public"
+            else -> "io.github.gcbond.openhc"
+        }
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         // 这个分支是上游 0.2.7 的全套协议/音频能力 + 安卓 4.1～7.x 车机适配（minSdk 16）。
         // 主线（main）是 0.2.7-android6（minSdk 23，versionCode 307）。
         //
-        // versionCode 用独立的 4xxxx 段：安卓 4 分支和主线装在同一台车机上时（同一个 applicationId），
-        // 号段分开才能互相覆盖安装、不用先卸载。4 开头 = 安卓 4 分支，后面跟「主版本 × 100 + 次版本 × 10 + 补丁」，
-        // 所以 0.2.7 是 40207。主线继续在 3xx 段递增，两条线互不干扰。
-        versionCode = 40207
-        versionName = "0.2.7-android4"
+        // 40210 是保留 Android 4 底座、含实车桌面恢复修复的发布快照；沿用 4xxxx 号段。
+        versionCode = 40210
+        versionName = when (api17Profile) {
+            "local-test" -> "0.2.7-android4-api17-ng-test-v40210"
+            "public-preview" -> "0.2.7-android4-api17-public-preview-v40210"
+            else -> "0.2.7-android4"
+        }
+        if (api17Profile == "local-test") resValue("string", "app_name", "OpenHC API17 Test")
+        if (publicApi17Preview) resValue("string", "app_name", "OpenHC API17 Preview")
         // 方法数超过 64K，安卓 4.x 要用 MultiDex 分包（5.0 起系统自带）。
         multiDexEnabled = true
     }

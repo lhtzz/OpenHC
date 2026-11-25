@@ -20,7 +20,7 @@ import java.nio.ByteBuffer
  * 条目按追加顺序编号，开始新的一段时序号接着往上数，不回头。
  * - `[firstSeq, cursor)`：这一遍已经送进解码器的；
  * - `[cursor, endSeq)`：还要送的，[nextToFeed] 依次给出，送完调 [markFed]；
- * - 序号小于 [deliveredEnd] 的条目以前送过，再送就是重放（[isReplay]）。
+ * - 以前送过的条目再送就是重放（[isReplay]）；恢复画布时也可把这之前尚未送出的条目一起重放。
  *
  * ## 上限
  * 条目数超过 [maxFrames] 或字节数超过 [maxBytes] 时，先丢掉已经送过的条目：到下一段之前都不能重放
@@ -61,9 +61,12 @@ internal class FrameCache(
     var endSeq = 0L
         private set
 
-    /** 最近一次 [rewind] 时已经送过的最后一帧（不算参数集），重放时上屏的就是它；没有为 -1。 */
+    /** 最近一次重放范围的最后一帧（不算参数集），重放时上屏的就是它；没有为 -1。 */
     var replayLastSeq = NONE
         private set
+
+    /** 恢复画布时也可以追到离开期间缓存的最后一帧；不把这些帧提前记成已送。 */
+    private var replayEnd = 0L
 
     private var startOffset = 0
     private var writeOffset = 0
@@ -153,15 +156,16 @@ internal class FrameCache(
     }
 
     /**
-     * 从段首起重送（重放）。返回会重放的帧数（不算参数集），不能重放（没在缓存、或者超过上限丢过）返回 -1，
-     * 这时什么都不变。重放完接着送还没送过的条目。
+     * 从段首起重送。默认只重放已送过的帧；恢复画布时可把当下的待送帧也纳入重放，直接追到最新画面。
+     * 返回重放的帧数（不算参数集），不能重放（没在缓存、或者超过上限丢过）返回 -1，这时什么都不变。
      */
-    fun rewind(nowMs: Long): Int {
+    fun rewind(nowMs: Long, includePending: Boolean = false): Int {
         if (!active || !historyComplete) return -1
         cursor = firstSeq
         if (cursor < endSeq) pendingSinceMs = nowMs
-        replayLastSeq = lastFrameBefore(deliveredEnd)
-        return countFrames(firstSeq, deliveredEnd)
+        replayEnd = if (includePending) endSeq else deliveredEnd
+        replayLastSeq = lastFrameBefore(replayEnd)
+        return countFrames(firstSeq, replayEnd)
     }
 
     /** 作废全部条目，停止缓存（解码器释放、要等关键帧时）。返回其中从没送过的帧数（算丢帧）。 */
@@ -184,7 +188,7 @@ internal class FrameCache(
 
     fun isReplay(seq: Long): Boolean {
         slotOf(seq)
-        return seq < deliveredEnd
+        return seq < deliveredEnd || seq < replayEnd
     }
 
     fun length(seq: Long): Int = lengths[slotOf(seq)]
@@ -237,6 +241,7 @@ internal class FrameCache(
         firstSeq = endSeq
         cursor = endSeq
         deliveredEnd = endSeq
+        replayEnd = endSeq
         startOffset = 0
         writeOffset = 0
         replayLastSeq = NONE

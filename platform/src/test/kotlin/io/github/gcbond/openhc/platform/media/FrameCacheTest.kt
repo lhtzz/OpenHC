@@ -133,6 +133,47 @@ class FrameCacheTest {
     }
 
     @Test
+    fun restoringTheSurfaceReplaysEvenFramesReceivedWhileItWasMissing() {
+        val cache = FrameCache(maxBytes = 1024, maxFrames = 16)
+        cache.startChain()
+        val config = cache.add(frame(0), config = true)
+        val key = cache.add(frame(1))
+        cache.feedAll()
+        val whileAway = cache.add(frame(2))
+        val latest = cache.add(frame(3))
+        val lateConfig = cache.add(frame(4), config = true)
+
+        assertEquals(3, cache.rewind(nowMs = 1_000, includePending = true))
+        assertEquals(latest, cache.replayLastSeq, "追到后台收到的最新图像，不把配置当作画面")
+        assertEquals(whileAway, cache.deliveredEnd, "准备重放不代表真的已送进解码器")
+        val live = cache.add(frame(5))
+        val expected = listOf(config, key, whileAway, latest, lateConfig, live)
+        for (seq in expected) {
+            assertEquals(seq, cache.nextToFeed())
+            assertEquals(seq != live, cache.isReplay(seq))
+            cache.markFed(1_000)
+        }
+        assertEquals(0, cache.pendingEntries)
+    }
+
+    @Test
+    fun keyFrameInBackgroundReplacesPriorRecoveryAndRetainsDropAccounting() {
+        val cache = FrameCache(maxBytes = 1024, maxFrames = 16)
+        cache.startChain()
+        cache.add(frame(1))
+        cache.markFed(0)
+        cache.add(frame(2))
+        assertEquals(2, cache.rewind(0, includePending = true))
+
+        assertEquals(1, cache.startChain(), "未真正送出的后台帧仍记为丢帧")
+        val nextKey = cache.add(frame(3))
+        assertFalse(cache.isReplay(nextKey), "新的一段不沿用旧重放状态")
+        assertEquals(1, cache.rewind(0, includePending = true))
+        assertEquals(nextKey, cache.nextToFeed())
+        assertEquals(nextKey, cache.replayLastSeq, "后台新关键帧来过则从它恢复，不等下一帧")
+    }
+
+    @Test
     fun replayStartsWithTheSavedParameterSets() {
         val cache = FrameCache(maxBytes = 1024, maxFrames = 16)
         cache.startChain()
@@ -172,6 +213,7 @@ class FrameCacheTest {
         assertFalse(cache.historyComplete)
         assertEquals(-1, cache.replayableFrames)
         assertEquals(-1, cache.rewind(0), "作废后不能重放")
+        assertEquals(-1, cache.rewind(0, includePending = true), "恢复画布也不能用残缺段")
         assertEquals(3, cache.keptEntries)
         assertEquals(3, cache.feedAll().size)
         assertEquals(0, cache.keptEntries, "作废以后送过的随即丢掉")

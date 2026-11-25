@@ -57,8 +57,8 @@ import kotlin.math.abs
  *   - 解码器可能扣着最后一帧、或者改了时间戳认不出最后一帧：手里总扣着最近交出的一个重放帧，
  *     一段时间没有新的就把它上屏（[ReplayPresenter]）。
  *   - 重放的帧不算进输入、解码帧率，单独计数（[VideoStats.replayed]）。
- *   - 解码器换过（释放后在新关键帧上重建）时，缓存也是从新关键帧起的，重放的只会是新解码器自己的帧；
- *     缓存超过上限作废了、或者解码器已经释放，就不重放，等手机的新帧。
+ *   - 旧系统不能切换输出时，释放绑定在旧画布的解码器，但仍有界地缓存完整的解码链；新画布就绪后用段首参数
+ *     重建并补送。不完整（断档、超限或格式变化）的旧链不重放，改等手机的新关键帧。
  *
  * ## 丢帧与恢复
  * 一旦丢了帧或者换了解码器，之后的 P 帧引用不到参考帧，所以统一丢到下一个能开始解码的帧为止，
@@ -68,7 +68,7 @@ import kotlin.math.abs
  * - 解码器报错（暂时性错误除外）、配置失败、卡死（见上）：释放解码器，下一个关键帧重建。
  * - SPS 里的尺寸、profile 等变了：在这个关键帧上当场换新解码器，不丢帧。
  * - Surface 没了（切后台、视图销毁）：默认把输出切到一个看不见的占位 Surface（setOutputSurface），解码不停、
- *   参考帧不断，Surface 回来时切回去并重放；切不过去才释放解码器、等关键帧。
+ *   参考帧不断，Surface 回来时切回去并重放；切不过去就释放解码器，优先用缓存恢复。
  *
  * 释放解码器一律 stop + release，异常都接住；[close] 之后不再持有任何 MediaCodec。
  *
@@ -120,6 +120,9 @@ class VideoDecoder @JvmOverloads constructor(
 
         /** 建不起解码器（没有能用的 H.264 解码器、尺寸不支持等），下一个关键帧会再试。 */
         fun onDecoderUnavailable(detail: String) {}
+
+        /** 画布丢失后的恢复进度，只包含状态与帧数，不包含视频内容。 */
+        fun onSurfaceRecovery(message: String) {}
     }
 
     class Options(
@@ -130,7 +133,7 @@ class VideoDecoder @JvmOverloads constructor(
         val useStreamTimestamps: Boolean = false,
         /**
          * 没有视图 Surface 时（切后台等）继续解码到看不见的占位 Surface，回到前台时重放缓存、马上有画面；
-         * false 则释放解码器，回来后等关键帧。
+         * false 或系统不支持切换输出时释放解码器，回来后优先从完整缓存恢复。
          */
         val decodeWithoutSurface: Boolean = true,
         /** 是否加厂商私有的低延迟键（见 [VendorLowLatency]）。 */
@@ -163,7 +166,7 @@ class VideoDecoder @JvmOverloads constructor(
 
     /** 为什么要丢帧等关键帧。 */
     enum class ResyncReason {
-        /** 没有视图 Surface，且不在后台解码（或者切到占位 Surface 失败），解码器已释放。 */
+        /** 画布丢失后没有可重放的完整缓存，需要等新的关键帧。 */
         SURFACE_LOST,
 
         /** 解码器迟迟不收帧，等着送的帧超出了缓存上限，丢了一帧。 */
@@ -233,6 +236,15 @@ class VideoDecoder @JvmOverloads constructor(
     private var sawBSlice = false
     private var lastPtsUs = 0L
     private val cache = FrameCache(options.cacheMaxBytes, options.cacheMaxFrames)
+
+    private data class CachedParameters(val sps: H264Sps, val csd0: ByteArray, val csd1: ByteArray)
+
+    /** 恢复时从段首的参数集起解，不能用后台收到、只适用于后续帧的新参数集替代。 */
+    private var cachedParameters: CachedParameters? = null
+    private var recoveringSurface = false
+
+    @Volatile
+    private var firstRestoredOutput: MediaCodec? = null
 
     // 日志用：刚建好的解码器多久给出第一个输入缓冲、头几帧到达后等了多久才送进去。
     private var installedAtMs = 0L
@@ -387,7 +399,11 @@ class VideoDecoder @JvmOverloads constructor(
             surfaceGeneration++
             // 排在下面的重放前面：重放出来的最后一帧按新 Surface 重新起拍。
             handler.post(pacerReset)
-            val c = codec ?: return
+            val c = codec
+            if (c == null) {
+                if (target != null && recoveringSurface) scheduleSurfaceRecoveryLocked()
+                return
+            }
             if (target != null) {
                 if (switchOutputLocked(c, target)) {
                     outputOnPlaceholder = false
@@ -395,12 +411,12 @@ class VideoDecoder @JvmOverloads constructor(
                     Log.i(TAG, "输出切回视图 Surface")
                     scheduleReplayLocked(c)
                 } else {
-                    teardownLocked(ResyncReason.SURFACE_LOST)
+                    releaseForSurfaceLocked()
                 }
                 return
             }
             val sps = codecSps
-            if (options.decodeWithoutSurface && sps != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && options.decodeWithoutSurface && sps != null) {
                 val placeholderSurface = placeholderLocked(sps.width, sps.height)
                 if (placeholderSurface != null) {
                     // 先标记再切：切换过程中出的帧直接还给解码器，不往占位 Surface 上送。
@@ -411,8 +427,60 @@ class VideoDecoder @JvmOverloads constructor(
                     }
                 }
             }
-            teardownLocked(ResyncReason.SURFACE_LOST)
+            releaseForSurfaceLocked()
         }
+    }
+
+    /** 返回前同步断开旧画布，不让 MediaCodec 再碰即将销毁的 Surface。 */
+    private fun releaseForSurfaceLocked() {
+        releaseCodecLocked()
+        recoveringSurface = true
+        if (waitingForSync || !cache.historyComplete || cachedParameters == null) {
+            discardChainLocked(ResyncReason.SURFACE_LOST)
+        }
+        reportSurfaceRecovery(if (cache.historyComplete) "画布离开：已释放旧解码器，保留视频缓存" else "画布离开：暂无完整视频缓存")
+        if (viewSurface != null) scheduleSurfaceRecoveryLocked()
+    }
+
+    private fun scheduleSurfaceRecoveryLocked() {
+        val generation = surfaceGeneration
+        handler.post {
+            lock.withLock {
+                if (!closed && recoveringSurface && generation == surfaceGeneration && viewSurface?.isValid == true) {
+                    restoreSurfaceLocked()
+                }
+            }
+        }
+    }
+
+    /** 解码线程：画布已经回来，不等手机再发一帧；也不在界面线程上创建 MediaCodec。 */
+    private fun restoreSurfaceLocked() {
+        recoveringSurface = false
+        val parameters = cachedParameters
+        val nowMs = now()
+        val frames = if (waitingForSync || parameters == null) -1 else cache.rewind(nowMs, includePending = true)
+        if (frames <= 0 || parameters == null) {
+            discardChainLocked(ResyncReason.SURFACE_LOST)
+            reportSurfaceRecovery("画布已恢复：无完整缓存，等手机发关键帧")
+            return
+        }
+        if (!configureLocked(parameters.sps, parameters)) {
+            discardChainLocked(ResyncReason.DECODER_ERROR)
+            reportSurfaceRecovery("画布已恢复：解码器重建失败，等手机发关键帧")
+            return
+        }
+        // 新解码器在 configure 时已经收下段首参数集，不再给它重复送这一条合成配置。
+        val first = cache.nextToFeed()
+        if (first >= 0 && cache.isConfig(first)) cache.markFed(nowMs)
+        firstRestoredOutput = codec
+        replayStartedMs = nowMs
+        replayFrames = frames
+        reportSurfaceRecovery("画布已恢复：解码器已重建，从缓存补送 $frames 帧")
+    }
+
+    private fun reportSurfaceRecovery(message: String) {
+        Log.i(TAG, message)
+        notifyListener { onSurfaceRecovery(message) }
     }
 
     /** HiSight 视频回调：在调用 feedVideo 的线程上同步执行，帧数据只在回调期间有效。 */
@@ -482,7 +550,9 @@ class VideoDecoder @JvmOverloads constructor(
 
     private fun feedLocked(data: ByteArray, offset: Int, length: Int, streamPtsUs: Long, afterGap: Boolean): Boolean {
         // 断档后的第一帧不是关键帧就等关键帧（不释放解码器）。放在最前面：这一帧哪怕被下面的提前返回挡掉，也已经开始等了。
-        if (afterGap && !scan.isSyncPoint) requireSyncLocked(ResyncReason.STREAM_GAP)
+        if (afterGap && !scan.isSyncPoint) {
+            if (recoveringSurface) discardChainLocked(ResyncReason.STREAM_GAP) else requireSyncLocked(ResyncReason.STREAM_GAP)
+        }
         if (scan.nalCount == 0) return drop(ResyncReason.BAD_STREAM)
         try {
             if (scan.spsStart >= 0) params.updateSps(data, scan.spsStart, scan.spsEnd)
@@ -498,10 +568,9 @@ class VideoDecoder @JvmOverloads constructor(
         // 只有 SEI、AUD 之类的帧不送进解码器。
         if (scan.sliceCount == 0 && !scan.isParameterSetsOnly) return false
 
-        val current = codec
-        val known = codecSps
+        val known = codecSps ?: cachedParameters?.sps?.takeIf { recoveringSurface }
         val latest = params.sps
-        if (current != null && known != null && latest != null) {
+        if (known != null && latest != null) {
             val formatChanged = needsNewDecoder(known, latest)
             // 按解码顺序立即输出遇上要重排的 B 帧，显示顺序会乱，得换成正常输出的配置。
             // SPS 已经声明不需要重排时，B 条带也是按显示顺序来的，不用换。
@@ -530,13 +599,20 @@ class VideoDecoder @JvmOverloads constructor(
                 Log.w(TAG, "关键帧之前没收到完整的 SPS/PPS，继续等")
                 return drop(null)
             }
-            if (!configureLocked(sps)) return drop(null)
+            if (!recoveringSurface && !configureLocked(sps)) return drop(null)
         }
         waitingForSync = false
 
         val nowMs = now()
-        if (scan.isSyncPoint) startChainLocked(nowMs)
-        when (cache.append(data, offset, length, scan.isParameterSetsOnly, nowMs, streamPtsUs)) {
+        if (scan.isSyncPoint) startChainLocked(nowMs, checkNotNull(latest))
+        val appended = cache.append(data, offset, length, scan.isParameterSetsOnly, nowMs, streamPtsUs)
+        if (recoveringSurface && appended != FrameCache.APPENDED) {
+            // 后台没有解码器接着消费；超过限额就放弃这一段，不能留无关键帧的半段给前台重放。
+            if (appended == FrameCache.REJECTED && !scan.isParameterSetsOnly) stats.onDropped()
+            discardChainLocked(ResyncReason.SURFACE_LOST)
+            return false
+        }
+        when (appended) {
             FrameCache.REJECTED -> {
                 // 已经送进去和排在前面的帧照样送：解码器的参考帧还是对的，只是这一帧以后的接不上了。
                 Log.w(TAG, "解码器迟迟不收帧，${cache.pendingEntries} 帧在等输入缓冲，缓存放不下了")
@@ -553,15 +629,16 @@ class VideoDecoder @JvmOverloads constructor(
     }
 
     /** 能开始解码的帧到了：缓存从它重新开始，段首先存一份当前的参数集。 */
-    private fun startChainLocked(nowMs: Long) {
+    private fun startChainLocked(nowMs: Long, sps: H264Sps) {
         val lost = cache.startChain()
         if (lost > 0) {
             stats.onDropped(lost)
             Log.i(TAG, "关键帧到了，还没送进解码器的 $lost 帧作废")
         }
-        // 解码器手里已经有这份参数集，所以记为已送，只在重放时先送它：flush 后有的解码器要重新给参数集，
-        // 这一段中途换过参数集时也不会拿新的去解前面的帧。
-        val config = params.csd0() + params.csd1()
+        // 合成的段首参数只在重放时才送。已有解码器不需要再送；画布恢复时用于配置新解码器。
+        val parameters = CachedParameters(sps, params.csd0(), params.csd1())
+        cachedParameters = parameters
+        val config = parameters.csd0 + parameters.csd1
         cache.append(config, 0, config.size, config = true, nowMs = nowMs, delivered = true)
     }
 
@@ -716,8 +793,13 @@ class VideoDecoder @JvmOverloads constructor(
     }
 
     private fun releaseNow(index: Int, render: Boolean) {
+        val output = outputCodec ?: return
         try {
-            outputCodec?.releaseOutputBuffer(index, render)
+            output.releaseOutputBuffer(index, render)
+            if (render && output === firstRestoredOutput && output === codec) {
+                firstRestoredOutput = null
+                reportSurfaceRecovery("恢复投屏：首帧已交给新画布")
+            }
         } catch (e: IllegalStateException) {
             // 解码器刚被别的线程释放。
         }
@@ -844,14 +926,14 @@ class VideoDecoder @JvmOverloads constructor(
 
     // ---------------------------------------------------------------- 解码器生命周期
 
-    private fun configureLocked(sps: H264Sps): Boolean {
+    private fun configureLocked(sps: H264Sps, parameters: CachedParameters? = null): Boolean {
         val surface = outputSurfaceLocked(sps)
         if (surface == null) {
             requireSyncLocked(ResyncReason.SURFACE_LOST)
             return false
         }
-        val csd0 = params.csd0()
-        val csd1 = params.csd1()
+        val csd0 = parameters?.csd0 ?: params.csd0()
+        val csd1 = parameters?.csd1 ?: params.csd1()
         val decodeOrder = sps.reorderFree || !sawBSlice
         val inputSize = maxOf(maxInputSize, sps.codedWidth * sps.codedHeight, MIN_INPUT_SIZE)
         val candidates: List<DecoderCatalog.Candidate?> =
@@ -1024,6 +1106,11 @@ class VideoDecoder @JvmOverloads constructor(
     private fun teardownLocked(reason: ResyncReason?) {
         val released = releaseCodecLocked()
         if (released != null) Log.i(TAG, "解码器已释放" + (reason?.let { "（$it）" } ?: ""))
+        discardChainLocked(reason)
+    }
+
+    private fun discardChainLocked(reason: ResyncReason?) {
+        cachedParameters = null
         val lost = cache.clear()
         if (lost > 0) stats.onDropped(lost)
         requireSyncLocked(reason)
@@ -1033,6 +1120,7 @@ class VideoDecoder @JvmOverloads constructor(
     private fun releaseCodecLocked(): MediaCodec? {
         val c = codec
         codec = null
+        firstRestoredOutput = null
         codecName = null
         codecSps = null
         codecDecodeOrder = false
@@ -1080,8 +1168,7 @@ class VideoDecoder @JvmOverloads constructor(
         }
         releaseCodecLocked()
         if (!configureLocked(sps)) {
-            val lost = cache.clear()
-            if (lost > 0) stats.onDropped(lost)
+            discardChainLocked(ResyncReason.DECODER_ERROR)
             return
         }
         val frames = cache.rewind(now())
